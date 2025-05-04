@@ -1,0 +1,96 @@
+#### This is openTelemetry collector configuration file
+#### We can use collector to collect telemetry data from application using OTLP then expose it for Jaeger, Prometheus or other applications to use it
+
+# receiver of the collector. Which in our case is OTLP
+receivers:
+  otlp:
+    protocols:
+      grpc: 
+        endpoint: 0.0.0.0:4317
+        # tls:
+        #   cert_file: cert.pem
+        #   key_file: cert-key.pem
+      http:
+        endpoint: 0.0.0.0:4318
+        # tls:
+        #   cert_file: cert.pem
+        #   key_file: cert-key.pem
+
+# processor is the section in otel collector that can modify or change data collected from receiver and send it to the exporters
+# configuring processor wouldn't enable it. processors would be enabled and work whenver you add it to the pipeline
+# List of processors and what they do --> Please take a look at readme 
+# https://github.com/open-telemetry/opentelemetry-collector/tree/main/processor
+# https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor
+processors:  
+  # The filterprocessor allows dropping spans, span events, metrics, datapoints, and logs from the collector.
+  #filter:
+  #  error_mode: ignore
+  #  traces:
+  #    span:
+  #      - IsMatch(resource.attributes["k8s.pod.name"], "my-pod-name.*")
+
+  
+  # attribute processor will read attributes of metrics,traces,logs and change them based on your needs
+  # examples of attribute processor https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/processor/attributesprocessor/testdata/config.yaml
+  #attributes:
+  #   - key: "mycustomattribute"
+  #     value: "value"
+  #     action: insert
+  #     
+  
+  # The memory limiter processor is used to prevent out of memory situations on the collector.
+  # if memory limit reach collector will refuse datas coming in and you will see error
+  memory_limiter:
+    check_interval: 1s # check memory usage every second
+    limit_percentage: 80 # 80% of total memory is hard limit of memory
+    spike_limit_percentage: 15 # 
+
+  # batch processor will compress metric, trace and logs and causes less outgoing connection to exporters
+  # IMPORTANT!!! batch processor should be always used after any other processor. because whenever the processor reaches it will send the batches to exporter and other processors won't have data anymore
+  batch:
+    send_batch_size: 8192 # if the batch size of span, metrics, logs reach to this limit, it will be sent to exporter regardless of the timeout
+    timeout: 200ms # after 200ms a batch will be sent out to exporters
+
+
+exporters:
+  # Jaeger exporter
+  otlphttp/jaeger:
+    endpoint: http://jaeger:4318
+    #tls:
+    #  cert_file: cert.pem
+    #  key_file: cert-key.pem
+  otlp/jaeger:
+    endpoint: "jaeger:4317" # Jaeger's default gRPC port is 4317
+    tls:
+      insecure: true # Set to false if you want to use TLS
+
+  # prometheus exporter
+  # prometheus:
+  #   endpoint: 0.0.0.0:8889 # configure which port to listen on and let prometheus to scrape metrics
+  #   namespace: default # this will be considered in front of each metric exposed by collector
+
+
+extensions:
+  health_check: # exposes health check of collector
+    endpoint: 0.0.0.0:13133
+  pprof: # exposes pprof of the collector
+    endpoint: 0.0.0.0:1888
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+# define for each tracer, metrics, logger what receiver or sender should be used.
+service:
+  extensions: [health_check, pprof, zpages]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger]
+    # metrics:
+    #   receivers: [otlp]
+    #   processors: [memory_limiter, batch]
+    #   exporters: [prometheus]
+    # logs:
+    #   receivers: [otlp]
+    #   processors: [batch]
+    #   exporters: [otlp]
