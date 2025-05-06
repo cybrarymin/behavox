@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 
@@ -15,11 +14,10 @@ func (api *ApiServer) logError(err error) {
 
 // errorResponse is the method we use to send a json formatted error to the client in case of any error
 func (api *ApiServer) errorResponse(w http.ResponseWriter, r *http.Request, status int, message interface{}) {
-	ctx := context.Background()
 	e := helpers.Envelope{
 		"error": message,
 	}
-	err := helpers.WriteJson(ctx, w, status, e, nil)
+	err := helpers.WriteJson(r.Context(), w, status, e, nil)
 
 	if err != nil {
 		api.logError(err)
@@ -55,11 +53,6 @@ func (api *ApiServer) methodNotAllowedResponse(w http.ResponseWriter, r *http.Re
 func (api *ApiServer) failedValidationResponse(w http.ResponseWriter, r *http.Request, errors map[string]string) {
 	api.errorResponse(w, r, http.StatusUnprocessableEntity, errors)
 }
-
-// func (api *ApiServer) editConflictResponse(w http.ResponseWriter, r *http.Request) {
-// 	message := "unable to update the record due to an edit conflict, please try again"
-// 	api.errorResponse(w, r, http.StatusConflict, message)
-// }
 
 func (api *ApiServer) rateLimitExceedResponse(w http.ResponseWriter, r *http.Request) {
 	message := "request rate limit reached, please try again later"

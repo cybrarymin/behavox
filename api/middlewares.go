@@ -12,6 +12,7 @@ import (
 	"github.com/felixge/httpsnoop"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
@@ -70,15 +71,15 @@ func (api *ApiServer) otelHandler(next http.Handler) http.HandlerFunc {
 /*
 promHandler is gonna expose and calculate the prometheus metrics values on each api path.
 */
-func (api *ApiServer) promHandler(next http.HandlerFunc, path string) http.HandlerFunc {
+func (api *ApiServer) promHandler(next http.HandlerFunc) http.HandlerFunc {
 	apiObserv.PromApplicationVersion.WithLabelValues(Version).Set(1)
 	return func(w http.ResponseWriter, r *http.Request) {
 		apiObserv.PromHttpTotalRequests.WithLabelValues().Inc()
-		pTimer := prometheus.NewTimer(apiObserv.PromHttpDuration.WithLabelValues(path))
+		pTimer := prometheus.NewTimer(apiObserv.PromHttpDuration.WithLabelValues(r.RequestURI))
 		defer pTimer.ObserveDuration()
 		snoopMetrics := httpsnoop.CaptureMetrics(next, w, r)
 		apiObserv.PromHttpTotalResponse.WithLabelValues().Inc()
-		apiObserv.PromHttpResponseStatus.WithLabelValues(path, strconv.Itoa(snoopMetrics.Code)).Inc()
+		apiObserv.PromHttpResponseStatus.WithLabelValues(r.RequestURI, strconv.Itoa(snoopMetrics.Code)).Inc()
 	}
 }
 
@@ -103,6 +104,10 @@ func (api *ApiServer) rateLimit(next http.Handler) http.Handler {
 		expirationTime := 30 * time.Second
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, span := otel.Tracer("rateLimit.Tracer").Start(r.Context(), "rateLimit.Span")
+			defer span.End()
+			r = r.WithContext(ctx)
+
 			if !nRL.Allow() { // In this code, whenever we call the Allow() method on the rate limiter exactly one token will be consumed from the bucket. And if there is no token in the bucket left Allow() will return false
 				api.rateLimitExceedResponse(w, r)
 				return

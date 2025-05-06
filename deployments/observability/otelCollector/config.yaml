@@ -23,11 +23,11 @@ receivers:
 # https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor
 processors:  
   # The filterprocessor allows dropping spans, span events, metrics, datapoints, and logs from the collector.
-  #filter:
-  #  error_mode: ignore
-  #  traces:
-  #    span:
-  #      - IsMatch(resource.attributes["k8s.pod.name"], "my-pod-name.*")
+  filter:
+   error_mode: ignore
+   traces:
+     span:
+       - IsMatch(attributes["user_agent.original"], "Prometheus*")
 
   
   # attribute processor will read attributes of metrics,traces,logs and change them based on your needs
@@ -53,6 +53,8 @@ processors:
 
 
 exporters:
+  debug:
+    verbosity: detailed
   # Jaeger exporter
   otlphttp/jaeger:
     endpoint: http://jaeger:4318
@@ -80,12 +82,15 @@ extensions:
 
 # define for each tracer, metrics, logger what receiver or sender should be used.
 service:
+  telemetry:
+    logs:
+      level: debug
   extensions: [health_check, pprof, zpages]
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [otlp/jaeger]
+      processors: [memory_limiter,filter, batch]
+      exporters: [otlp/jaeger,debug]
     # metrics:
     #   receivers: [otlp]
     #   processors: [memory_limiter, batch]
