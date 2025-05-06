@@ -1,0 +1,214 @@
+* API Routes
+:PROPERTIES:
+:TOC: :include descendants
+:END:
+
+:CONTENTS:
+- [[#concepts-and-purpose][Concepts and purpose]]
+  - [[#http-routing-system][HTTP routing system]]
+  - [[#middleware-integration][Middleware integration]]
+- [[#design-and-implementation][Design and implementation]]
+  - [[#router-initialization][Router initialization]]
+  - [[#error-handling-routes][Error handling routes]]
+  - [[#application-routes][Application routes]]
+  - [[#metrics-endpoint][Metrics endpoint]]
+  - [[#middleware-chain][Middleware chain]]
+- [[#usage-examples][Usage examples]]
+  - [[#server-initialization-with-routes][Server initialization with routes]]
+  - [[#extending-the-router][Extending the router]]
+  - [[#routing-with-path-parameters][Routing with path parameters]]
+:END:
+
+** Concepts and purpose
+
+*** HTTP routing system
+
+- HTTP routing :: The API server implements a structured routing system that maps HTTP endpoints to their corresponding handlers. The routing system is responsible for:
+  - URL pattern matching :: Matching incoming request URLs to registered handler functions
+  - HTTP method handling :: Enforcing method-specific handlers (GET, POST, etc.)
+  - Error responses :: Providing consistent responses for not found routes and method not allowed errors
+  - Metrics collection :: Instrumenting all routes with Prometheus metrics for monitoring
+  The router acts as the entry point for all API requests and directs them to the appropriate business logic handlers.
+
+*** Middleware integration
+
+- Middleware chain :: The router implements a comprehensive middleware chain that applies cross-cutting concerns to all routes:
+  - Panic recovery :: Prevents server crashes by recovering from panics in handlers
+  - Rate limiting :: Controls request rates to prevent abuse
+  - Request context :: Adds request IDs for tracing and correlation
+  - OpenTelemetry :: Provides distributed tracing for all requests
+  - Prometheus metrics :: Collects performance metrics for all routes
+  This middleware chain ensures consistent behavior across all API endpoints while maintaining clean separation of concerns.
+
+** Design and implementation
+
+*** Router initialization
+
+- Router setup :: The `routes` method initializes an HTTP router with all configured routes
+  - Uses the `httprouter` package for efficient URL pattern matching
+  - Returns a fully configured `http.Handler` ready for use with the server
+  #+BEGIN_SRC go
+func (api *ApiServer) routes() http.Handler {
+	router := httprouter.New()
+	
+	// Configuration of routes...
+	
+	return api.panicRecovery(api.rateLimit(api.setContextHandler(api.otelHandler(router))))
+}
+  #+END_SRC
+
+*** Error handling routes
+
+- Error handler configuration :: Sets up custom handlers for common HTTP errors
+  - Not Found (404) responses for nonexistent routes
+  - Method Not Allowed (405) responses for incorrect HTTP methods
+  - Both error handlers are instrumented with Prometheus metrics
+  #+BEGIN_SRC go
+// handle error responses for both notFoundResponses and InvalidMethods
+router.NotFound = api.promHandler(http.HandlerFunc(api.notFoundResponse), "")
+router.MethodNotAllowed = api.promHandler(api.methodNotAllowedResponse, "")
+  #+END_SRC
+
+*** Application routes
+
+- Event endpoints :: Registers handlers for event-related API operations
+  - POST `/v1/events` for creating new events
+  - GET `/v1/events/stats` for retrieving event statistics
+  - All routes are instrumented with path-specific Prometheus metrics
+  #+BEGIN_SRC go
+// handle the event
+router.HandlerFunc(http.MethodPost, "/v1/events", api.promHandler(api.createEventHandler, "/v1/events"))
+router.HandlerFunc(http.MethodGet, "/v1/events/stats", api.promHandler(api.GetEventStatsHandler, "/v1/events/stats"))
+  #+END_SRC
+
+*** Metrics endpoint
+
+- Prometheus metrics :: Exposes a dedicated endpoint for scraping Prometheus metrics
+  - Uses the standard Prometheus handler from the `promhttp` package
+  - Available at the `/metrics` path via HTTP GET
+  #+BEGIN_SRC go
+// Prometheus Handler
+router.Handler(http.MethodGet, "/metrics", promhttp.Handler())
+  #+END_SRC
+
+*** Middleware chain
+
+- Middleware application :: Wraps the configured router with the middleware chain
+  - Applies middleware in a specific order to ensure correct processing
+  - Creates a unified handler that processes all middleware for each request
+  - Order: panic recovery → rate limiting → context handling → OpenTelemetry
+  #+BEGIN_SRC go
+return api.panicRecovery(api.rateLimit(api.setContextHandler(api.otelHandler(router))))
+  #+END_SRC
+
+** Usage examples
+
+*** Server initialization with routes
+
+Example of initializing the server with the configured routes:
+
+#+BEGIN_SRC go
+package main
+
+import (
+    "net/http"
+    "context"
+    "time"
+    
+    "github.com/cybrarymin/behavox/api"
+)
+
+func main() {
+    // Initialize API server
+    // ... server configuration as shown in previous examples ...
+    
+    // Get the configured router
+    router := apiServer.routes()
+    
+    // Create the HTTP server with the router
+    httpServer := &http.Server{
+        Addr:         cfg.ListenAddr.Host,
+        Handler:      router,
+        ReadTimeout:  cfg.ServerReadTimeout,
+        WriteTimeout: cfg.ServerWriteTimeout,
+        IdleTimeout:  cfg.ServerIdleTimeout,
+    }
+    
+    // Start the server
+    go func() {
+        apiServer.Logger.Info().Msg("Starting server")
+        if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            apiServer.Logger.Fatal().Err(err).Msg("Server failed")
+        }
+    }()
+    
+    // ... graceful shutdown code ...
+}
+#+END_SRC
+
+*** Extending the router
+
+Example of adding a new route to the existing router:
+
+#+BEGIN_SRC go
+// Extend the routes method to add a health check endpoint
+func (api *ApiServer) routes() http.Handler {
+    router := httprouter.New()
+    
+    // Existing configuration...
+    router.NotFound = api.promHandler(http.HandlerFunc(api.notFoundResponse), "")
+    router.MethodNotAllowed = api.promHandler(api.methodNotAllowedResponse, "")
+    
+    // Add a health check endpoint
+    router.HandlerFunc(http.MethodGet, "/health", api.promHandler(api.healthCheckHandler, "/health"))
+    
+    // Event endpoints
+    router.HandlerFunc(http.MethodPost, "/v1/events", api.promHandler(api.createEventHandler, "/v1/events"))
+    router.HandlerFunc(http.MethodGet, "/v1/events/stats", api.promHandler(api.GetEventStatsHandler, "/v1/events/stats"))
+    
+    // Prometheus Handler
+    router.Handler(http.MethodGet, "/metrics", promhttp.Handler())
+    
+    return api.panicRecovery(api.rateLimit(api.setContextHandler(api.otelHandler(router))))
+}
+
+// Health check handler implementation
+func (api *ApiServer) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte(`{"status":"healthy"}`))
+}
+#+END_SRC
+
+*** Routing with path parameters
+
+Example of adding a route with URL parameters:
+
+#+BEGIN_SRC go
+// Extend the routes method to include a route with path parameters
+func (api *ApiServer) routes() http.Handler {
+    router := httprouter.New()
+    
+    // Existing configuration...
+    
+    // Add a route with a path parameter for getting a specific event by ID
+    router.GET("/v1/events/:id", func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+        // Extract the ID from the URL
+        id := ps.ByName("id")
+        
+        // Use the ID parameter to look up the event
+        // ...
+        
+        // Example response
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusOK)
+        w.Write([]byte(`{"id":"` + id + `","name":"Example Event"}`))
+    })
+    
+    // Wrap the parameterized route with middleware
+    // The handler is now directly assigned using router.GET instead of HandlerFunc
+    // to take advantage of httprouter's path parameters
+    
+    return api.panicRecovery(api.rateLimit(api.setContextHandler(api.otelHandler(router))))
+}
+#+END_SRC

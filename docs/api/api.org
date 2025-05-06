@@ -1,0 +1,346 @@
+* API Server
+:PROPERTIES:
+:TOC: :include descendants
+:END:
+
+:CONTENTS:
+- [[#concepts-and-purpose][Concepts and purpose]]
+  - [[#api-server-configuration][API server configuration]]
+  - [[#request-context-management][Request context management]]
+- [[#design-and-implementation][Design and implementation]]
+  - [[#api-server-configuration-structure][API server configuration structure]]
+  - [[#api-server-structure][API server structure]]
+  - [[#configuration-validation][Configuration validation]]
+  - [[#request-context-handling][Request context handling]]
+- [[#usage-examples][Usage examples]]
+  - [[#creating-and-configuring-the-api-server][Creating and configuring the API server]]
+  - [[#handling-request-context][Handling request context]]
+  - [[#complete-server-initialization][Complete server initialization]]
+:END:
+
+** Concepts and purpose
+
+*** API server configuration
+
+- API server configuration :: The API server configuration provides necessary parameters for HTTP/HTTPS serving, connection handling, TLS settings, and rate limiting. The configuration holds settings that control:
+  - Server address and protocol :: The address and protocol (HTTP/HTTPS) used by the server
+  - Connection timeouts :: Read, write, and idle timeouts to prevent resource exhaustion
+  - TLS settings :: Certificate and key file paths for HTTPS serving
+  - Rate limiting :: Global and per-client rate limiting settings to prevent abuse
+  These configuration parameters enable fine-tuning of the server's behavior to meet performance and security requirements.
+
+*** Request context management
+
+- Request context :: Each API request is assigned a unique request ID stored in the request context, enabling:
+  - Request tracing :: The ability to track a request through the system for debugging
+  - Correlation :: Linking logs, metrics, and traces to specific requests
+  - Observability :: Enhanced monitoring and troubleshooting capabilities
+  The request ID is a UUID generated for each incoming request and made available to all handlers and middleware in the request processing chain.
+
+** Design and implementation
+
+*** API server configuration structure
+
+- API server configuration :: The `ApiServerCfg` struct defines all necessary settings for running the API server
+  | ~ListenAddr *url.URL~       | URL containing address and protocol for server to listen on |
+  | ~ServerReadTimeout~         | Maximum time allowed to read client request bodies |
+  | ~ServerWriteTimeout~        | Maximum time allowed to write a response to the client |
+  | ~ServerIdleTimeout~         | Maximum time connection can be idle before closing |
+  | ~TlsCertFile~               | Path to TLS certificate file for HTTPS serving |
+  | ~TlsKeyFile~                | Path to TLS key file for HTTPS serving |
+  | ~RateLimit~                 | Nested struct containing rate limiting settings |
+  | ~RateLimit.GlobalRateLimit~ | Maximum requests per second for entire server |
+  | ~RateLimit.perClientRateLimit~ | Maximum requests per second per client IP |
+  | ~RateLimit.Enabled~         | Flag to enable/disable rate limiting |
+  #+BEGIN_SRC go
+type ApiServerCfg struct {
+	ListenAddr         *url.URL      // http server listen address url
+	ServerReadTimeout  time.Duration // amount of time allowed to read a request body otherwise server will return an error
+	ServerWriteTimeout time.Duration // amount of time allowed to write a response for the client
+	ServerIdleTimeout  time.Duration // amount of time in idle mode before closing the connection with client
+	TlsCertFile        string        // Tls certificate file for https serving
+	TlsKeyFile         string        // Tls key file https serving
+	RateLimit          struct {
+		GlobalRateLimit    int64
+		perClientRateLimit int64
+		Enabled            bool
+	}
+}
+  #+END_SRC
+
+- Configuration factory :: The `NewApiServerCfg` function creates and initializes a properly configured `ApiServerCfg` instance
+  #+BEGIN_SRC go
+func NewApiServerCfg(listenAddr *url.URL, tlsCertFile string, tlsKeyFile string, rateLimitEnabled bool, globalRateLimit int64, perCleintRateLimit int64, srvReadTimeout, srvIdleTimeout, srvWriteTimeout time.Duration) *ApiServerCfg {
+	return &ApiServerCfg{
+		ListenAddr:         listenAddr,
+		ServerReadTimeout:  srvReadTimeout,
+		ServerWriteTimeout: srvWriteTimeout,
+		ServerIdleTimeout:  srvIdleTimeout,
+		TlsCertFile:        tlsCertFile,
+		TlsKeyFile:         tlsKeyFile,
+		RateLimit: struct {
+			GlobalRateLimit    int64
+			perClientRateLimit int64
+			Enabled            bool
+		}{
+			GlobalRateLimit:    globalRateLimit,
+			Enabled:            rateLimitEnabled,
+			perClientRateLimit: perCleintRateLimit,
+		},
+	}
+}
+  #+END_SRC
+
+*** API server structure
+
+- API server :: The `ApiServer` struct encapsulates the server's state and dependencies
+  | ~Cfg *ApiServerCfg~     | Reference to server configuration |
+  | ~Logger *zerolog.Logger~ | Structured logger for recording server events |
+  | ~Wg sync.WaitGroup~     | Wait group for coordinating goroutines |
+  | ~mu sync.RWMutex~       | Read-write mutex for thread-safe operations |
+  #+BEGIN_SRC go
+type ApiServer struct {
+	Cfg    *ApiServerCfg
+	Logger *zerolog.Logger
+	Wg     sync.WaitGroup
+	mu     sync.RWMutex
+}
+  #+END_SRC
+
+- Server factory :: The `NewApiServer` function creates a new `ApiServer` instance with the given configuration and logger
+  #+BEGIN_SRC go
+func NewApiServer(cfg *ApiServerCfg, logger *zerolog.Logger) *ApiServer {
+	return &ApiServer{
+		Cfg:    cfg,
+		Logger: logger,
+	}
+}
+  #+END_SRC
+
+*** Configuration validation
+
+- Configuration validation :: The `validation` method checks the configuration for validity
+  - Verifies that the URL scheme is either "http" or "https"
+  - For HTTPS, checks that certificate and key files exist
+  - Returns an updated validator with any validation errors
+  #+BEGIN_SRC go
+func (cfg *ApiServerCfg) validation(nVal helpers.Validator) *helpers.Validator {
+	nVal.Check(cfg.ListenAddr.Scheme == "http" || cfg.ListenAddr.Scheme == "https", "listen-addr", "invalid schema")
+	if cfg.ListenAddr.Scheme == "https" {
+		_, err := os.Stat(cfg.TlsCertFile)
+		nVal.Check(err == nil, "tls-certfile", fmt.Sprintf("%s doesn't exists", cfg.TlsCertFile))
+		_, err = os.Stat(cfg.TlsKeyFile)
+		nVal.Check(err == nil, "tls-key", fmt.Sprintf("%s doesn't exists", cfg.TlsKeyFile))
+	}
+	return &nVal
+}
+  #+END_SRC
+
+*** Request context handling
+
+- Request context key :: A constant defining the key used to store and retrieve the request ID in the context
+  #+BEGIN_SRC go
+type contextKey string
+
+const RequestContextKey = contextKey("request_id")
+  #+END_SRC
+
+- Setting request ID :: The `setReqIDContext` method generates a unique UUID for each request and adds it to the request context
+  #+BEGIN_SRC go
+func (api *ApiServer) setReqIDContext(r *http.Request) *http.Request {
+	reqId := uuid.New()
+	nCtx := context.WithValue(r.Context(), RequestContextKey, reqId.String())
+	r = r.WithContext(nCtx)
+	return r
+}
+  #+END_SRC
+
+- Getting request ID :: The `getReqIDContext` method retrieves the request ID from the request context
+  #+BEGIN_SRC go
+func (api *ApiServer) getReqIDContext(r *http.Request) string {
+	reqID := r.Context().Value(RequestContextKey)
+	return reqID.(string)
+}
+  #+END_SRC
+
+** Usage examples
+
+*** Creating and configuring the API server
+
+Example of creating and configuring the API server:
+
+#+BEGIN_SRC go
+package main
+
+import (
+    "net/url"
+    "os"
+    "time"
+    
+    "github.com/cybrarymin/behavox/api"
+    "github.com/rs/zerolog"
+)
+
+func main() {
+    // Create a logger
+    logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+    
+    // Parse the listen address
+    listenURL, _ := url.Parse("http://localhost:8080")
+    
+    // Create the API server configuration
+    cfg := api.NewApiServerCfg(
+        listenURL,                  // Listen address
+        "",                         // TLS cert file (empty for HTTP)
+        "",                         // TLS key file (empty for HTTP)
+        true,                       // Enable rate limiting
+        100,                        // Global rate limit: 100 requests/second
+        10,                         // Per-client rate limit: 10 requests/second
+        time.Second*10,             // Read timeout
+        time.Second*120,            // Idle timeout
+        time.Second*10,             // Write timeout
+    )
+    
+    // Create the API server
+    server := api.NewApiServer(cfg, &logger)
+    
+    // Server is now ready for route configuration and startup
+}
+#+END_SRC
+
+*** Handling request context
+
+Example of using the request context in a handler:
+
+#+BEGIN_SRC go
+package main
+
+import (
+    "net/http"
+    
+    "github.com/cybrarymin/behavox/api"
+)
+
+func main() {
+    // ... server initialization from previous example ...
+    
+    // Example handler that uses the request ID
+    logRequestHandler := func(w http.ResponseWriter, r *http.Request) {
+        // Get request ID from context
+        requestID := server.getReqIDContext(r)
+        
+        // Log with request ID
+        server.Logger.Info().
+            Str("request_id", requestID).
+            Str("path", r.URL.Path).
+            Msg("Handling request")
+        
+        // Handle the request
+        w.Write([]byte("Request processed successfully"))
+    }
+    
+    // Create a wrapped handler that ensures request ID is set
+    wrappedHandler := server.setContextHandler(http.HandlerFunc(logRequestHandler))
+    
+    // Register the handler
+    http.Handle("/api/example", wrappedHandler)
+}
+#+END_SRC
+
+*** Complete server initialization
+
+Complete example of initializing and starting the server:
+
+#+BEGIN_SRC go
+package main
+
+import (
+    "context"
+    "net/http"
+    "net/url"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+    
+    "github.com/cybrarymin/behavox/api"
+    "github.com/rs/zerolog"
+)
+
+func main() {
+    // Create a logger
+    logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+    
+    // Parse the listen address
+    listenURL, _ := url.Parse("http://localhost:8080")
+    
+    // Create the API server configuration
+    cfg := api.NewApiServerCfg(
+        listenURL,
+        "",
+        "",
+        true,
+        100,
+        10,
+        time.Second*10,
+        time.Second*120,
+        time.Second*10,
+    )
+    
+    // Create the API server
+    server := api.NewApiServer(cfg, &logger)
+    
+    // Configure HTTP server
+    httpServer := &http.Server{
+        Addr:         cfg.ListenAddr.Host,
+        ReadTimeout:  cfg.ServerReadTimeout,
+        WriteTimeout: cfg.ServerWriteTimeout,
+        IdleTimeout:  cfg.ServerIdleTimeout,
+    }
+    
+    // Register handlers
+    http.Handle("/api/example", server.setContextHandler(
+        server.panicRecovery(
+            server.rateLimit(
+                server.otelHandler(
+                    http.HandlerFunc(
+                        server.promHandler(exampleHandler, "/api/example")
+                    )
+                )
+            )
+        )
+    ))
+    
+    // Start the server in a goroutine
+    go func() {
+        server.Logger.Info().
+            Str("addr", cfg.ListenAddr.String()).
+            Msg("Starting API server")
+            
+        if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            server.Logger.Fatal().Err(err).Msg("Server failed to start")
+        }
+    }()
+    
+    // Wait for interrupt signal to gracefully shut down the server
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+    <-quit
+    
+    // Create a deadline for server shutdown
+    ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+    defer cancel()
+    
+    // Attempt graceful shutdown
+    server.Logger.Info().Msg("Shutting down server...")
+    if err := httpServer.Shutdown(ctx); err != nil {
+        server.Logger.Fatal().Err(err).Msg("Server forced to shutdown")
+    }
+    
+    server.Logger.Info().Msg("Server exited gracefully")
+}
+
+func exampleHandler(w http.ResponseWriter, r *http.Request) {
+    w.Write([]byte("Hello, world!"))
+}
+#+END_SRC

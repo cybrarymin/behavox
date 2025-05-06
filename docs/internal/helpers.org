@@ -1,0 +1,351 @@
+* HTTP JSON Helpers
+:PROPERTIES:
+:TOC: :include descendants
+:END:
+
+:CONTENTS:
+- [[#concepts-and-purpose][Concepts and purpose]]
+  - [[#json-request-and-response-handling][JSON request and response handling]]
+  - [[#opentelemetry-integration][OpenTelemetry integration]]
+- [[#design-and-implementation][Design and implementation]]
+  - [[#envelope-type][Envelope type]]
+  - [[#json-response-writer][JSON response writer]]
+  - [[#json-request-reader][JSON request reader]]
+  - [[#error-handling-for-json-parsing][Error handling for JSON parsing]]
+- [[#usage-examples][Usage examples]]
+  - [[#writing-json-responses][Writing JSON responses]]
+  - [[#reading-json-requests][Reading JSON requests]]
+  - [[#error-handling-in-handlers][Error handling in handlers]]
+:END:
+
+** Concepts and purpose
+
+*** JSON request and response handling
+
+- JSON helpers :: The helpers package provides utilities for handling JSON in HTTP requests and responses with:
+  - Type-safe request parsing :: Convert incoming JSON into strongly typed Go structures
+  - Consistent response formatting :: Wrap outgoing data in a standard envelope format
+  - Comprehensive error handling :: Detailed, user-friendly error messages for malformed JSON
+  - Request size limiting :: Protection against oversized payloads that could cause denial of service
+  - Validation of request structure :: Detection of missing fields, unknown fields, and type mismatches
+  These helpers standardize the JSON handling across the API, ensuring consistent behavior and reducing boilerplate code in handlers.
+
+*** OpenTelemetry integration
+
+- Observability integration :: The helpers include built-in OpenTelemetry instrumentation that provides:
+  - Request/response tracing :: Track JSON parsing and serialization operations
+  - Error recording :: Capture detailed error information in traces
+  - Performance monitoring :: Measure time spent in JSON operations
+  - Debugging context :: Provide context for troubleshooting JSON parsing issues
+  This integration ensures that all JSON operations are properly traced and monitored, making it easier to diagnose issues in production.
+
+** Design and implementation
+
+*** Envelope type
+
+- Envelope data structure :: A type alias for a map that wraps response data
+  - Uses `map[string]interface{}` to allow any JSON-serializable value
+  - Provides a consistent top-level structure for all API responses
+  - Enables adding metadata fields alongside the primary response data
+  #+BEGIN_SRC go
+type Envelope map[string]interface{}
+  #+END_SRC
+
+*** JSON response writer
+
+- WriteJson function :: Writes JSON responses with proper headers and status codes
+  - Creates a span for OpenTelemetry tracing
+  - Uses a buffer to separate JSON marshaling from HTTP writing
+  - Sets appropriate headers including Content-Type
+  - Sets the specified HTTP status code
+  - Returns any errors encountered during the process
+  #+BEGIN_SRC go
+// WriteJson will write the data as response with desired http header and http status code
+func WriteJson(ctx context.Context, w http.ResponseWriter, status int, data Envelope, headers http.Header) error {
+	_, span := otel.Tracer("ReadJson.Tracer").Start(ctx, "ReadJson.Span")
+	defer span.End()
+
+	// considering bytes.Buffer instead of directly writing to the http.responseWriter to be able to segregate the error handling for json marshaling and write errors
+	nBuffer := bytes.Buffer{}
+	err := json.NewEncoder(&nBuffer).Encode(data)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to serialize data into json format")
+		return err
+	}
+
+	for key, value := range headers {
+		w.Header()[key] = value
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, err = w.Write(nBuffer.Bytes())
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to write json data as a response")
+		return err
+	}
+	return nil
+}
+  #+END_SRC
+
+*** JSON request reader
+
+- ReadJson function :: Reads and parses JSON from HTTP requests into typed Go structures
+  - Uses generics for type-safe parsing
+  - Creates a span for OpenTelemetry tracing
+  - Limits request body size to prevent resource exhaustion
+  - Disallows unknown fields to catch typos and misunderstandings
+  - Returns a zero value and error when parsing fails
+  #+BEGIN_SRC go
+// ReadJson reads the json bytes from a requests and deserialize it in dst
+func ReadJson[T any](ctx context.Context, w http.ResponseWriter, r *http.Request) (T, error) {
+	_, span := otel.Tracer("ReadJson.Tracer").Start(ctx, "ReadJson.Span")
+	defer span.End()
+
+	var output, zero T
+	// Limit the amount of bytes accepted as post request body
+	maxBytes := 1_048_576 // _ here is only for visual separator purpose and for int values go's compiler will ignore it.
+	r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
+	dec := json.NewDecoder(r.Body)
+	// Initialize the json.Decoder, and call the DisallowUnknownFields() method on it
+	// before decoding. This means that if the JSON from the client now includes any
+	// field which cannot be mapped to the target destination, the decoder will return
+	// an error instead of just ignoring the field.
+	dec.DisallowUnknownFields()
+	err := dec.Decode(&output)
+	
+	// Error handling code omitted for brevity
+	
+	return output, nil
+}
+  #+END_SRC
+
+*** Error handling for JSON parsing
+
+- Detailed error handling :: The ReadJson function provides comprehensive error handling
+  - Syntax errors :: Detects and reports malformed JSON with position information
+  - Type errors :: Identifies mismatched types between JSON and Go structures
+  - Unknown fields :: Reports fields in the JSON that don't exist in the Go structure
+  - Size limits :: Enforces maximum request body size
+  - Multiple values :: Ensures request contains exactly one JSON value
+  - Empty body :: Checks for completely empty request bodies
+  Each error case produces a specific, user-friendly error message that helps API clients fix their requests.
+  #+BEGIN_SRC go
+if err != nil {
+	var syntaxError *json.SyntaxError
+	var unmarshalTypeError *json.UnmarshalTypeError
+	var invalidUnmarshalError *json.InvalidUnmarshalError
+	switch {
+	// This happens if we json syntax errors. having wrong commas or indentation or missing quotes
+	case errors.As(err, &syntaxError):
+		err = fmt.Errorf("body contains badly-formed json (at character %d)", syntaxError.Offset)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to read the json body")
+		return zero, err
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		var zero T
+		err = errors.New("body contains badly-formed JSON")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to read the json body")
+		return zero, err
+
+	// This will happen if we try to unmarshal a json value of a type to a struct field that doesn't support that specific type
+	case errors.As(err, &unmarshalTypeError):
+		if unmarshalTypeError.Field != "" {
+			err = fmt.Errorf("invalid type used for the key %s", unmarshalTypeError.Field)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to read the json body")
+			return zero, err
+		}
+		// if client provide completely different type of json. for example instead of json of object type it sends an array content json
+		err = fmt.Errorf("body contains incorrect JSON type (at character %d)", unmarshalTypeError.Offset)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to read the json body")
+		return zero, err
+
+	// If the JSON contains a field which cannot be mapped to the target destination
+	// then Decode() will now return an error message in the format "json: unknown
+	// field "<name>"". We check for this, extract the field name from the error,
+	// and interpolate it into our custom error message.
+	case strings.HasPrefix(err.Error(), "json: unknown field"):
+		fieldName := strings.TrimPrefix(err.Error(), "json: unknown field")
+		err = fmt.Errorf("body contains unknown field %s", fieldName)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to read the json body")
+		return zero, err
+
+	// If the request body exceeds 1MB in size the decode will now fail with the
+	// error "http: request body too large". There is an open issue about turning
+	// this into a distinct error type at https://github.com/golang/go/issues/30715.
+	case err.Error() == "http: request body too large":
+		err = fmt.Errorf("body must not be larger than %d bytes", maxBytes)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to read the json body")
+		return zero, err
+
+	// Error will happen if we pass invalid type to json.Decode function. we should always pass a pointer otherwise it will give us error
+	case errors.As(err, &invalidUnmarshalError):
+		panic(err)
+	case errors.Is(err, io.EOF):
+		err = errors.New("json body must not be empty")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to read the json body")
+		return zero, err
+	default:
+		return zero, err
+	}
+}
+
+// Check for multiple JSON values
+err = dec.Decode(&struct{}{})
+if err != io.EOF {
+	err = errors.New("body must only contain a single json value")
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "failed to read the json body")
+	return zero, err
+}
+  #+END_SRC
+
+** Usage examples
+
+*** Writing JSON responses
+
+Example of writing a successful response:
+
+#+BEGIN_SRC go
+func getUserHandler(w http.ResponseWriter, r *http.Request) {
+    // Get user ID from path or query parameters
+    userID := r.PathValue("id")
+    
+    // Fetch user data (example)
+    user := User{
+        ID:    userID,
+        Name:  "John Doe",
+        Email: "john@example.com",
+    }
+    
+    // Create response envelope
+    data := helpers.Envelope{
+        "user": user,
+        "meta": map[string]interface{}{
+            "timestamp": time.Now().Unix(),
+            "version":   "1.0",
+        },
+    }
+    
+    // Set custom headers if needed
+    headers := http.Header{}
+    headers.Set("Cache-Control", "max-age=30")
+    
+    // Write the JSON response
+    err := helpers.WriteJson(r.Context(), w, http.StatusOK, data, headers)
+    if err != nil {
+        // Handle the error
+        serverErrorResponse(w, r, err)
+        return
+    }
+}
+#+END_SRC
+
+*** Reading JSON requests
+
+Example of reading and validating a JSON request:
+
+#+BEGIN_SRC go
+func createUserHandler(w http.ResponseWriter, r *http.Request) {
+    // Define the expected request structure
+    type UserInput struct {
+        Name     string `json:"name"`
+        Email    string `json:"email"`
+        Password string `json:"password"`
+    }
+    
+    // Read and parse the JSON request
+    input, err := helpers.ReadJson[UserInput](r.Context(), w, r)
+    if err != nil {
+        // The error is already well-formatted by ReadJson
+        badRequestResponse(w, r, err)
+        return
+    }
+    
+    // Validate the input
+    validator := helpers.NewValidator()
+    validator.Check(input.Name != "", "name", "must be provided")
+    validator.Check(input.Email != "", "email", "must be provided")
+    validator.Check(len(input.Password) >= 8, "password", "must be at least 8 characters")
+    
+    if !validator.Valid() {
+        failedValidationResponse(w, r, validator.Errors)
+        return
+    }
+    
+    // Process the valid input and create a response
+    user := User{
+        ID:    uuid.New().String(),
+        Name:  input.Name,
+        Email: input.Email,
+    }
+    
+    // Create a response with the new user
+    err = helpers.WriteJson(r.Context(), w, http.StatusCreated, helpers.Envelope{"user": user}, nil)
+    if err != nil {
+        serverErrorResponse(w, r, err)
+        return
+    }
+}
+#+END_SRC
+
+*** Error handling in handlers
+
+Example of handling errors in a handler using the helpers:
+
+#+BEGIN_SRC go
+func updateUserHandler(w http.ResponseWriter, r *http.Request) {
+    // Define the expected request structure
+    type UpdateInput struct {
+        Name  *string `json:"name"`
+        Email *string `json:"email"`
+    }
+    
+    // Get user ID from path
+    userID := r.PathValue("id")
+    
+    // Read and parse the JSON request
+    input, err := helpers.ReadJson[UpdateInput](r.Context(), w, r)
+    if err != nil {
+        switch {
+        case strings.Contains(err.Error(), "body contains unknown field"):
+            // Handle unknown field errors specifically
+            errorMessage := fmt.Sprintf("%s. Valid fields are: name, email", err.Error())
+            badRequestResponse(w, r, errors.New(errorMessage))
+        case strings.Contains(err.Error(), "body must not be larger than"):
+            // Handle oversized requests specifically
+            tooLargeResponse(w, r, err)
+        default:
+            // Handle other JSON parsing errors
+            badRequestResponse(w, r, err)
+        }
+        return
+    }
+    
+    // Process the update request
+    
+    // Return a success response
+    response := helpers.Envelope{
+        "message": "User updated successfully",
+        "user_id": userID,
+    }
+    
+    err = helpers.WriteJson(r.Context(), w, http.StatusOK, response, nil)
+    if err != nil {
+        serverErrorResponse(w, r, err)
+        return
+    }
+}
+
+// Custom error response for oversized requests
+func tooLargeResponse(w http.ResponseWriter, r *http.Request, err error) {
+    errorResponse(w, r, http.StatusRequestEntityTooLarge, err.Error())
+}
+#+END_SRC

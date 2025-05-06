@@ -1,0 +1,306 @@
+* API Error Handling
+:PROPERTIES:
+:TOC: :include descendants
+:END:
+
+:CONTENTS:
+- [[#concepts-and-purpose][Concepts and purpose]]
+  - [[#centralized-error-handling][Centralized error handling]]
+  - [[#standardized-error-responses][Standardized error responses]]
+- [[#design-and-implementation][Design and implementation]]
+  - [[#error-logging][Error logging]]
+  - [[#error-response-structure][Error response structure]]
+  - [[#common-error-handlers][Common error handlers]]
+  - [[#authentication-error-handlers][Authentication error handlers]]
+  - [[#permission-error-handlers][Permission error handlers]]
+- [[#usage-examples][Usage examples]]
+  - [[#handling-validation-errors][Handling validation errors]]
+  - [[#reporting-server-errors][Reporting server errors]]
+  - [[#responding-to-authentication-failures][Responding to authentication failures]]
+:END:
+
+** Concepts and purpose
+
+*** Centralized error handling
+
+- Error handling system :: The API server implements a centralized error handling system that provides:
+  - Consistent error logging :: All errors are logged with the same format and detail level
+  - Standardized client responses :: All error responses follow a consistent JSON structure
+  - Error type categorization :: Different error conditions map to appropriate HTTP status codes
+  - Clear error messages :: Human-readable error messages for both logs and client responses
+  This centralized approach ensures that error handling is uniform across the entire API, improving both developer experience and client usability.
+
+*** Standardized error responses
+
+- Error response format :: All API errors are returned to clients using:
+  - Consistent JSON structure :: All errors use the same envelope format with an "error" field
+  - Appropriate HTTP status codes :: Status codes correctly reflect the nature of the error
+  - Informative messages :: Clear, concise explanation of what went wrong
+  - Authentication headers :: WWW-Authenticate headers included where relevant
+  Standardized error responses make it easier for clients to handle errors programmatically and for developers to debug issues.
+
+** Design and implementation
+
+*** Error logging
+
+- Error logging :: The `logError` method centralizes error logging for the API server
+  - Uses structured logging :: Logs errors in a consistent format with context
+  - Encapsulates logging details :: Abstracts the specific logging implementation
+  #+BEGIN_SRC go
+// logError is the method we use to log the errors hapiens on the server side for the ApiServer.
+func (api *ApiServer) logError(err error) {
+	api.Logger.Error().Err(err).Send()
+}
+  #+END_SRC
+
+*** Error response structure
+
+- Standard error response :: The `errorResponse` method creates a standardized JSON error response
+  - Uses a common envelope structure :: Wraps errors in a consistent JSON format
+  - Sets appropriate HTTP status code :: Includes the correct status for the error type
+  - Handles response writing errors :: Logs failures to write the error response
+  #+BEGIN_SRC go
+// errorResponse is the method we use to send a json formatted error to the client in case of any error
+func (api *ApiServer) errorResponse(w http.ResponseWriter, r *http.Request, status int, message interface{}) {
+	ctx := context.Background()
+	e := helpers.Envelope{
+		"error": message,
+	}
+	err := helpers.WriteJson(ctx, w, status, e, nil)
+
+	if err != nil {
+		api.logError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+  #+END_SRC
+
+*** Common error handlers
+
+- Server error handler :: The `serverErrorResponse` method handles internal server errors
+  - Logs the error details :: Records the full error for debugging
+  - Provides a generic message to clients :: Avoids leaking sensitive information
+  - Uses HTTP 500 status code :: Indicates a server-side problem
+  #+BEGIN_SRC go
+// serverErrorResponse uses the two other methods to log the details of the error and send internal server error to the client
+func (api *ApiServer) serverErrorResponse(w http.ResponseWriter, r *http.Request, err error) {
+	api.logError(err)
+	message := "the server encountered an error to process the request"
+	api.errorResponse(w, r, http.StatusInternalServerError, message)
+}
+  #+END_SRC
+
+- Not found handler :: The `notFoundResponse` method handles resource not found errors
+  - Uses HTTP 404 status code :: Indicates the requested resource doesn't exist
+  - Provides a clear message :: Explains that the resource couldn't be found
+  #+BEGIN_SRC go
+// notFoundResponse method will be used to send notFound 404 status error json response to the client
+func (api *ApiServer) notFoundResponse(w http.ResponseWriter, r *http.Request) {
+	message := "the requested resource couldn't be found"
+	api.errorResponse(w, r, http.StatusNotFound, message)
+}
+  #+END_SRC
+
+- Bad request handler :: The `badRequestResponse` method handles malformed request errors
+  - Uses HTTP 400 status code :: Indicates a client-side request problem
+  - Includes the specific error :: Provides details about what was wrong with the request
+  #+BEGIN_SRC go
+// badRequestResponse method will be used to send notFound 400 status error json response to the client
+func (api *ApiServer) badRequestResponse(w http.ResponseWriter, r *http.Request, err error) {
+	api.errorResponse(w, r, http.StatusBadRequest, err.Error())
+}
+  #+END_SRC
+
+- Method not allowed handler :: The `methodNotAllowedResponse` method handles unsupported HTTP methods
+  - Uses HTTP 405 status code :: Indicates the HTTP method isn't supported
+  - Includes the attempted method :: Mentions which method was used but not supported
+  #+BEGIN_SRC go
+// methodNotAllowed method will be used to send notFound 404 status error json response to the client
+func (api *ApiServer) methodNotAllowedResponse(w http.ResponseWriter, r *http.Request) {
+	message := fmt.Sprintf("the %s method is not supported for this resource", r.Method)
+	api.errorResponse(w, r, http.StatusMethodNotAllowed, message)
+}
+  #+END_SRC
+
+- Validation error handler :: The `failedValidationResponse` method handles input validation failures
+  - Uses HTTP 422 status code :: Indicates request was understood but contained invalid values
+  - Includes detailed validation errors :: Maps field names to specific error messages
+  #+BEGIN_SRC go
+// failedValidationResponse method will be used to send 422 status error json response to the client for invalid input
+func (api *ApiServer) failedValidationResponse(w http.ResponseWriter, r *http.Request, errors map[string]string) {
+	api.errorResponse(w, r, http.StatusUnprocessableEntity, errors)
+}
+  #+END_SRC
+
+- Rate limit exceeded handler :: The `rateLimitExceedResponse` method handles rate limiting
+  - Uses HTTP 429 status code :: Indicates too many requests
+  - Suggests trying again later :: Informs the client to retry after a delay
+  #+BEGIN_SRC go
+func (api *ApiServer) rateLimitExceedResponse(w http.ResponseWriter, r *http.Request) {
+	message := "request rate limit reached, please try again later"
+	api.errorResponse(w, r, http.StatusTooManyRequests, message)
+}
+  #+END_SRC
+
+*** Authentication error handlers
+
+- Invalid credentials handler :: The `invalidAuthenticationCredResponse` method handles bad credentials
+  - Uses HTTP 401 status code :: Indicates authentication failure
+  - Sets WWW-Authenticate header :: Specifies Bearer JWT authentication scheme
+  - Provides an authentication failure message :: Indicates credentials or token are invalid
+  #+BEGIN_SRC go
+func (api *ApiServer) invalidAuthenticationCredResponse(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("WWW-Authenticate", "Bearer Jwt")
+	message := "invalid authentication creds or token"
+	api.errorResponse(w, r, http.StatusUnauthorized, message)
+}
+  #+END_SRC
+
+- Invalid JWT handler :: The `invalidJWTTokenSignatureResponse` method handles JWT validation failures
+  - Uses HTTP 401 status code :: Indicates authentication failure
+  - Sets WWW-Authenticate header :: Specifies Bearer JWT authentication scheme
+  - Specifically indicates JWT signature issue :: Helps identify token tampering
+  #+BEGIN_SRC go
+func (api *ApiServer) invalidJWTTokenSignatureResponse(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("WWW-Authenticate", "Bearer Jwt")
+	message := "invalid jwt token signature."
+	api.errorResponse(w, r, http.StatusUnauthorized, message)
+}
+  #+END_SRC
+
+- Authentication required handler :: The `authenticationRequiredResposne` method handles missing authentication
+  - Uses HTTP 401 status code :: Indicates authentication is needed
+  - Sets WWW-Authenticate header :: Specifies Bearer JWT authentication scheme
+  - Clearly states authentication is required :: Prompts client to provide authentication
+  #+BEGIN_SRC go
+func (api *ApiServer) authenticationRequiredResposne(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("WWW-Authenticate", "Bearer Jwt")
+	message := "authentication required"
+	api.errorResponse(w, r, http.StatusUnauthorized, message)
+}
+  #+END_SRC
+
+*** Permission error handlers
+
+- Inactive user handler :: The `unauthorizedAccessInactiveUserResponse` method handles inactive user access
+  - Uses HTTP 403 status code :: Indicates forbidden access
+  - Explains activation requirement :: Indicates user needs to be activated
+  #+BEGIN_SRC go
+func (api *ApiServer) unauthorizedAccessInactiveUserResponse(w http.ResponseWriter, r *http.Request) {
+	message := "user must be activated to access this resource"
+	api.errorResponse(w, r, http.StatusForbidden, message)
+}
+  #+END_SRC
+
+- Permission denied handler :: The `notPermittedResponse` method handles insufficient permissions
+  - Uses HTTP 403 status code :: Indicates forbidden access
+  - Explains permission requirement :: Indicates user lacks necessary permissions
+  #+BEGIN_SRC go
+func (api *ApiServer) notPermittedResponse(w http.ResponseWriter, r *http.Request) {
+	message := "your user account doesn't have the necessary permissions to access this resource"
+	api.errorResponse(w, r, http.StatusForbidden, message)
+}
+  #+END_SRC
+
+** Usage examples
+
+*** Handling validation errors
+
+Example of validating input and returning appropriate errors:
+
+#+BEGIN_SRC go
+func (api *ApiServer) createUserHandler(w http.ResponseWriter, r *http.Request) {
+    var input struct {
+        Name     string `json:"name"`
+        Email    string `json:"email"`
+        Password string `json:"password"`
+    }
+    
+    // Parse the request body
+    err := helpers.ReadJson(r, &input)
+    if err != nil {
+        api.badRequestResponse(w, r, err)
+        return
+    }
+    
+    // Validate the input
+    validator := helpers.NewValidator()
+    validator.Check(input.Name != "", "name", "must be provided")
+    validator.Check(len(input.Name) <= 100, "name", "must not exceed 100 characters")
+    validator.Check(input.Email != "", "email", "must be provided")
+    validator.Check(helpers.ValidEmail(input.Email), "email", "must be a valid email address")
+    validator.Check(len(input.Password) >= 8, "password", "must be at least 8 characters long")
+    
+    // Return 422 Unprocessable Entity if validation fails
+    if !validator.Valid() {
+        api.failedValidationResponse(w, r, validator.Errors)
+        return
+    }
+    
+    // Process the valid input
+    // ...
+}
+#+END_SRC
+
+*** Reporting server errors
+
+Example of handling unexpected errors during database operations:
+
+#+BEGIN_SRC go
+func (api *ApiServer) getUserHandler(w http.ResponseWriter, r *http.Request) {
+    // Extract user ID from request
+    id := r.PathValue("id")
+    
+    // Attempt to fetch the user from the database
+    user, err := api.database.GetUser(id)
+    if err != nil {
+        // Check if it's a not found error
+        if err == database.ErrRecordNotFound {
+            api.notFoundResponse(w, r)
+            return
+        }
+        
+        // Handle unexpected database errors
+        api.serverErrorResponse(w, r, err)
+        return
+    }
+    
+    // Return the user as JSON response
+    err = helpers.WriteJson(r.Context(), w, http.StatusOK, helpers.Envelope{"user": user}, nil)
+    if err != nil {
+        api.serverErrorResponse(w, r, err)
+    }
+}
+#+END_SRC
+
+*** Responding to authentication failures
+
+Example of handling authentication in a protected endpoint:
+
+#+BEGIN_SRC go
+func (api *ApiServer) updateProfileHandler(w http.ResponseWriter, r *http.Request) {
+    // Get the user from context (set by authentication middleware)
+    user, ok := r.Context().Value(userContextKey).(*User)
+    
+    // Check if authentication is missing
+    if !ok {
+        api.authenticationRequiredResposne(w, r)
+        return
+    }
+    
+    // Check if user is activated
+    if !user.Activated {
+        api.unauthorizedAccessInactiveUserResponse(w, r)
+        return
+    }
+    
+    // Check if user has required permissions
+    if !user.HasPermission("users:write") {
+        api.notPermittedResponse(w, r)
+        return
+    }
+    
+    // Handle the authenticated and authorized request
+    // ...
+}
+#+END_SRC
