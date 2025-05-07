@@ -11,29 +11,27 @@ import (
 	apiObserv "github.com/cybrarymin/behavox/api/observability"
 	"github.com/felixge/httpsnoop"
 	"github.com/prometheus/client_golang/prometheus"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 )
 
 /*
 setContextHandler sets the required key, values on the http.request context
 */
-func (api *ApiServer) setContextHandler(next http.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (api *ApiServer) setContextHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r = api.setReqIDContext(r)
 		next.ServeHTTP(w, r)
-	}
+	})
 }
 
 /*
 panicRecovery handler is gonna be used to avoid server sending empty reply as a response to the client when a panic happens.
 The server will recover the panic and sends http status code 500 with internal error to the client and logs the panic with stack.
 */
-func (api *ApiServer) panicRecovery(next http.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (api *ApiServer) panicRecovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if panicErr := recover(); panicErr != nil {
 				// Setting this header will trigger the HTTP server to close the connection after Panic happended
@@ -42,30 +40,31 @@ func (api *ApiServer) panicRecovery(next http.Handler) http.HandlerFunc {
 			}
 		}()
 		next.ServeHTTP(w, r)
-	}
+	})
 }
 
 /*
 otelHandler is gonna instrument the otel http handler
 */
-func (api *ApiServer) otelHandler(next http.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (api *ApiServer) otelHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		/*
 			adding the request id to the context to be visible inside the span so each request can be tracable
 		*/
-		newNext := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			reqID := api.getReqIDContext(r)
-			span := trace.SpanFromContext(r.Context())
-			if reqID != "" {
-				span.SetAttributes(attribute.String("http.request.id", fmt.Sprintf("%v", reqID)))
-			}
-			next.ServeHTTP(w, r)
-		})
+		// newNext := http.H(func(w http.ResponseWriter, r *http.Request) {
+		// 	reqID := api.getReqIDContext(r)
+		// 	span := trace.SpanFromContext(r.Context())
+		// 	if reqID != "" {
+		// 		span.SetAttributes(attribute.String("http.request.id", fmt.Sprintf("%v", reqID)))
+		// 	}
+		// 	next.ServeHTTP(w, r)
+		// })
 
-		nHander := otelhttp.NewHandler(newNext, "otel.instrumented.handler")
-		nHander.ServeHTTP(w, r)
+		// nHander := otelhttp.NewHandler(newNext, "otel.instrumented.handler")
+		// nHander.ServeHTTP(w, r)
+		next.ServeHTTP(w, r)
 
-	}
+	})
 }
 
 /*
@@ -104,8 +103,13 @@ func (api *ApiServer) rateLimit(next http.Handler) http.Handler {
 		expirationTime := 30 * time.Second
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx, span := otel.Tracer("rateLimit.Tracer").Start(r.Context(), "rateLimit.Span")
+			// Create the span with the current context
+			tracer := otel.GetTracerProvider().Tracer("rateLimit.Tracer")
+			ctx, span := tracer.Start(r.Context(), "rateLimit.Span")
 			defer span.End()
+			span.SetAttributes(attribute.String("request.path", r.RequestURI))
+
+			// Update the request with the new context containing our span
 			r = r.WithContext(ctx)
 
 			if !nRL.Allow() { // In this code, whenever we call the Allow() method on the rate limiter exactly one token will be consumed from the bucket. And if there is no token in the bucket left Allow() will return false
