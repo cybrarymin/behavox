@@ -213,7 +213,7 @@ func (w *Worker) processEvent(ctx context.Context, event data.Event) error {
 
 	// simulate an additional processing time for the metadata
 	randomTime := 0.05 + rand.Float32()*(0.2-0.05)
-	time.Sleep(5 * time.Second) //TODO TSHOOT
+	time.Sleep(time.Duration(randomTime))
 
 	metaProcessingTime := randomTime + float32(firstPhaseProcessTime.Seconds())
 

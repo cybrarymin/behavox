@@ -1,66 +1,75 @@
-* Worker
+* Event Worker
 :PROPERTIES:
 :TOC: :include descendants
 :END:
 
 :CONTENTS:
 - [[#concepts-and-purpose][Concepts and purpose]]
-  - [[#event-processing][Event processing]]
+  - [[#asynchronous-event-processing][Asynchronous event processing]]
   - [[#worker-lifecycle-management][Worker lifecycle management]]
-  - [[#metrics-and-observability][Metrics and observability]]
+  - [[#event-processing-reliability][Event processing reliability]]
+  - [[#observability-integration][Observability integration]]
 - [[#design-and-implementation][Design and implementation]]
   - [[#worker-structure][Worker structure]]
-  - [[#worker-creation-and-initialization][Worker creation and initialization]]
-  - [[#worker-run-loop][Worker run loop]]
+  - [[#worker-initialization][Worker initialization]]
+  - [[#event-processing-loop][Event processing loop]]
   - [[#event-processing-implementation][Event processing implementation]]
   - [[#graceful-shutdown][Graceful shutdown]]
 - [[#usage-examples][Usage examples]]
   - [[#creating-and-running-a-worker][Creating and running a worker]]
-  - [[#implementing-event-processing-logic][Implementing event processing logic]]
-  - [[#handling-worker-shutdown][Handling worker shutdown]]
-  - [[#working-with-metrics][Working with metrics]]
+  - [[#handling-different-event-types][Handling different event types]]
+  - [[#graceful-worker-shutdown][Graceful worker shutdown]]
+  - [[#monitoring-worker-performance][Monitoring worker performance]]
 :END:
 
 ** Concepts and purpose
 
-*** Event processing
+*** Asynchronous event processing
 
-- Event consumption :: The worker is responsible for consuming events from an event queue and processing them with:
-  - Structured processing :: Each event follows a standard processing flow
-  - Error handling :: Failed events are retried with appropriate backoff
-  - Tracing :: OpenTelemetry tracing for each processing step
-  - Metrics :: Prometheus metrics for monitoring performance
-  The worker provides a reliable mechanism for asynchronous processing of different event types.
+- Event processing :: The worker component provides asynchronous processing of events from the queue:
+  - Queue consumption :: Continuously takes events from the event queue
+  - Processing isolation :: Separates event processing from HTTP request handling
+  - Persistent storage :: Records processed events to a file for durability
+  - Independent operation :: Runs as a separate goroutine from the API server
+  This asynchronous approach enables better scalability and responsiveness of the API.
 
 *** Worker lifecycle management
 
-- Worker lifecycle :: The worker maintains a controlled lifecycle with:
-  - Initialization :: Setting up dependencies and internal state
-  - Running :: Processing events from the queue in a continuous loop
-  - Graceful shutdown :: Ensuring in-flight events are processed before stopping
-  - Context cancellation :: Supporting external cancellation signals
-  This lifecycle management ensures clean startup and shutdown without losing events.
+- Lifecycle control :: The worker implements a controlled lifecycle with:
+  - Initialization :: Sets up dependencies and state at creation time
+  - Running :: Processes events in a continuous loop
+  - Graceful shutdown :: Ensures proper cleanup when the application terminates
+  - Context-based cancellation :: Supports cancellation through context
+  This lifecycle management ensures proper resource utilization and cleanup.
 
-*** Metrics and observability
+*** Event processing reliability
 
-- Worker metrics :: The worker collects and exposes metrics for monitoring:
-  - Events processed :: Count of total events processed
-  - Processing status :: Counts by success, failure, or skip status
-  - Processing duration :: Time taken to process events
-  - Retry counts :: Number of event processing retries
-  - Queue wait time :: Time events spend waiting in queue
-  These metrics enable monitoring of worker performance and health.
+- Processing resilience :: The worker enhances event processing reliability through:
+  - Error handling :: Catches and logs processing errors
+  - Retry mechanism :: Attempts to reprocess events after failures
+  - Metrics tracking :: Records success, failure, and retry counts
+  - Backoff strategy :: Waits between retries to prevent resource exhaustion
+  This reliability ensures that transient errors don't result in lost events.
+
+*** Observability integration
+
+- Monitoring and tracing :: The worker integrates with observability tools to provide:
+  - OpenTelemetry tracing :: Tracks the processing of each event
+  - Prometheus metrics :: Collects metrics on processing performance and outcomes
+  - Queue wait time tracking :: Measures how long events wait in the queue
+  - Processing duration tracking :: Measures how long processing takes
+  These observability features aid in monitoring and troubleshooting the system.
 
 ** Design and implementation
 
 *** Worker structure
 
 - Worker struct :: Encapsulates the worker's state and dependencies
-  | ~wg sync.WaitGroup~     | Wait group for coordinating goroutines |
-  | ~Logger *zerolog.Logger~ | Structured logger for recording worker events |
-  | ~EventQueue *data.EventQueue~ | Queue from which events are consumed |
-  | ~Ctx context.Context~    | Context for lifecycle management |
-  | ~Cancel context.CancelFunc~ | Function to cancel the worker context |
+  - Configuration :: Location for storing processed events
+  - Logger :: Structured logger for recording worker events
+  - Event queue :: Reference to the event queue for consumption
+  - Concurrency controls :: WaitGroup for coordinating shutdown
+  - Context management :: Context and CancelFunc for lifecycle control
   #+BEGIN_SRC go
 type Worker struct {
 	wg         sync.WaitGroup
@@ -71,12 +80,12 @@ type Worker struct {
 }
   #+END_SRC
 
-*** Worker creation and initialization
+*** Worker initialization
 
-- Worker factory :: The `NewWorker` function creates a new worker instance
-  - Takes a logger, event queue, and parent context
-  - Creates a derived context with cancellation for worker lifecycle
-  - Initializes the worker struct with the provided dependencies
+- Worker creation :: The `NewWorker` function creates and initializes a worker instance
+  - Receives dependencies :: Takes logger, event queue, and parent context
+  - Creates derived context :: Sets up a context with cancellation for worker lifecycle
+  - Returns initialized worker :: Provides a ready-to-run worker instance
   #+BEGIN_SRC go
 func NewWorker(logger *zerolog.Logger, eq *data.EventQueue, ctx context.Context) *Worker {
 	ctx, cancel := context.WithCancel(ctx)
@@ -89,14 +98,16 @@ func NewWorker(logger *zerolog.Logger, eq *data.EventQueue, ctx context.Context)
 }
   #+END_SRC
 
-*** Worker run loop
+*** Event processing loop
 
-- Run method :: The main event processing loop
-  - Adds to the worker's WaitGroup for shutdown coordination
-  - Continuously consumes events from the queue
-  - Processes each event and handles errors with retry logic
-  - Collects metrics for monitoring and observability
-  - Responds to context cancellation for graceful shutdown
+- Run method :: The `Run` method implements the main event processing loop
+  - Registration with WaitGroup :: Adds to WaitGroup for shutdown coordination
+  - Context monitoring :: Watches for context cancellation to stop processing
+  - Event consumption :: Retrieves events from the queue
+  - Event processing :: Handles different event types with appropriate processing
+  - Error handling :: Catches and handles processing errors with retries
+  - Metrics collection :: Records metrics about processing outcomes
+  This loop continues until the context is cancelled during shutdown.
   #+BEGIN_SRC go
 func (w *Worker) Run(ctx context.Context) {
 	runCtx := w.Ctx
@@ -106,7 +117,10 @@ func (w *Worker) Run(ctx context.Context) {
 	for {
 		select {
 		case nEvent := <-w.EventQueue.Events:
+			// Process event with tracing and metrics
 			spanCtx, span := otel.Tracer("Worker.Tracer").Start(ctx, "Worker.Span")
+			
+			// Determine event type for metrics
 			var EventType string
 			switch nEvent.(type) {
 			case *data.EventLog:
@@ -114,33 +128,20 @@ func (w *Worker) Run(ctx context.Context) {
 			case *data.EventMetric:
 				EventType = "metric"
 			}
-
-			// Measure queue wait time
-			var queueWaitTime float64
-			if baseEvent, ok := nEvent.(*data.EventLog); ok && !baseEvent.BaseEvent.EnqueueTime.IsZero() {
-				queueWaitTime = time.Since(baseEvent.BaseEvent.EnqueueTime).Seconds()
-				observ.PromEventQueueWaitTime.WithLabelValues(EventType).Observe(queueWaitTime)
-			} else if baseEvent, ok := nEvent.(*data.EventMetric); ok && !baseEvent.BaseEvent.EnqueueTime.IsZero() {
-				queueWaitTime = time.Since(baseEvent.BaseEvent.EnqueueTime).Seconds()
-				observ.PromEventQueueWaitTime.WithLabelValues(EventType).Observe(queueWaitTime)
-			}
-
-			// Process event with timing
-			eventProcessingStart := time.Now()
-			err := processEvent(spanCtx, nEvent)
 			
-			// Error handling and retry logic
+			// Measure queue wait time and record metrics
+            // [Queue wait time measurement code omitted for brevity]
+            
+			// Process the event with error handling and retries
+			err := processEvent(spanCtx, nEvent)
 			if err != nil {
-				// ... error handling code ...
+				// Handle error with retry logic
+                // [Error handling and retry code omitted for brevity]
 			}
-
-			// Record metrics and complete span
-			processingDuration := time.Since(eventProcessingStart).Seconds()
-			observ.PromEventProcessingDuration.WithLabelValues(EventType).Observe(processingDuration)
-			observ.PromEventTotalProcessStatus.WithLabelValues("success", EventType).Inc()
-			observ.PromEventTotalProcessed.WithLabelValues().Inc()
-			span.End()
-
+			
+			// Record metrics and finish span
+            // [Metrics recording code omitted for brevity]
+			
 		case <-runCtx.Done():
 			w.Logger.Info().Msg("worker run loop exiting due to context cancellation")
 			return
@@ -151,22 +152,22 @@ func (w *Worker) Run(ctx context.Context) {
 
 *** Event processing implementation
 
-- Process event function :: Processes individual events
-  - Creates a span for tracing the event processing
-  - Extracts event metadata and performs processing
-  - Calculates various metrics related to the event
-  - Persists processing results to a file
-  - Handles and reports errors with appropriate context
+- Process event function :: The `processEvent` function handles individual events
+  - Tracing instrumentation :: Creates a span for tracking event processing
+  - Event metadata extraction :: Gets metadata from the event
+  - Digest calculation :: Computes a hash of the event metadata
+  - Processing simulation :: Simulates processing time for demonstration
+  - Result persistence :: Writes processing results to a file
+  This function implements the core business logic for event processing.
   #+BEGIN_SRC go
 func processEvent(ctx context.Context, event data.Event) error {
 	ctx, span := otel.Tracer("Worker.ProcessEvent.Tracer").Start(ctx, "Worker.ProcessEvent.Span")
 	defer span.End()
 
-	// Processing logic
-	startTime := time.Now()
+	// Extract event metadata
 	eMeta := event.GetMetadata()
 	
-	// Serialize metadata to JSON
+	// Serialize to JSON and calculate hash
 	jMeta, err := helpers.MarshalJson(ctx, eMeta)
 	if err != nil {
 		span.RecordError(err)
@@ -174,7 +175,7 @@ func processEvent(ctx context.Context, event data.Event) error {
 		return err
 	}
 
-	// Calculate hash and other metrics
+	// Calculate hash, length, and get goroutine ID
 	hasher := md5.New()
 	hasher.Write(jMeta)
 	metaHashHex := hex.EncodeToString(hasher.Sum(nil))
@@ -185,21 +186,40 @@ func processEvent(ctx context.Context, event data.Event) error {
 	firstPhaseProcessTime := time.Since(startTime)
 	randomTime := 0.05 + rand.Float32()*(0.2-0.05)
 	time.Sleep(time.Duration(randomTime))
-	
-	// Persist results
-	// ... persistence logic ...
-	
+	metaProcessingTime := randomTime + float32(firstPhaseProcessTime.Seconds())
+
+	// Create processing result
+	processResult := struct {
+		Event          data.Event
+		Md5            string
+		Length         int
+		GoRoutineID    uint64
+		ProcessingTime string
+		ProcessedAt    time.Time
+	}{
+		Event:          event,
+		Md5:            metaHashHex,
+		Length:         metaLength,
+		GoRoutineID:    metaGoroutineId,
+		ProcessingTime: fmt.Sprintf("%.4f", metaProcessingTime),
+		ProcessedAt:    time.Now(),
+	}
+
+	// Write result to file
+	// [File writing code omitted for brevity]
+
 	return nil
 }
   #+END_SRC
 
 *** Graceful shutdown
 
-- Shutdown method :: Handles graceful worker shutdown
-  - Cancels the worker context to signal shutdown
-  - Creates a channel to wait for all goroutines to finish
-  - Uses a select to handle both normal completion and timeout
-  - Returns an error if shutdown times out
+- Shutdown method :: The `Shutdown` method implements graceful worker termination
+  - Cancellation :: Cancels the worker's context to signal termination
+  - Wait channel :: Creates a channel to track WaitGroup completion
+  - Timeout handling :: Uses a select to handle completion or timeout
+  - Status reporting :: Reports success or failure of shutdown
+  This method ensures all in-progress processing completes before shutdown.
   #+BEGIN_SRC go
 func (w *Worker) Shutdown(ctx context.Context) error {
 	w.Logger.Info().Msg("initiating worker shutdown")
@@ -229,180 +249,149 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 
 *** Creating and running a worker
 
-Example of creating and running a worker:
+Example of basic worker initialization and execution:
 
 #+BEGIN_SRC go
-package main
+// Create dependencies
+logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+ctx := context.Background()
+eventQueue := models.NewEventQueue()
 
-import (
-	"context"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
+// Set output file
+worker.CmdProcessedEventFile = "/tmp/processed_events.json"
 
-	"github.com/cybrarymin/behavox/api/observability"
-	"github.com/cybrarymin/behavox/internal/models"
-	"github.com/cybrarymin/behavox/worker"
-	"github.com/rs/zerolog"
-)
+// Create and start worker
+eventWorker := worker.NewWorker(&logger, eventQueue, ctx)
+go eventWorker.Run(ctx)
 
-func main() {
-	// Create a logger
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-	
-	// Create an event queue
-	models.CmdEventQueueSize = 100
-	eventQueue := models.NewEventQueue()
-	
-	// Initialize Prometheus metrics
-	observ.PromInit(eventQueue, "1.0.0")
-	
-	// Create a context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	
-	// Create the worker
-	worker.CmdProcessedEventFile = "processed_events.json"
-	w := worker.NewWorker(&logger, eventQueue, ctx)
-	
-	// Run the worker in a separate goroutine
-	go w.Run(ctx)
-	
-	// Wait for termination signal
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-	
-	// Perform graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-	
-	if err := w.Shutdown(shutdownCtx); err != nil {
-		logger.Error().Err(err).Msg("Worker shutdown failed")
-		os.Exit(1)
-	}
+// Add events to queue for processing
+eventID := uuid.New().String()
+logEvent := models.NewEventLog(eventID, "info", "Test event")
+eventQueue.PutEvent(ctx, logEvent)
+
+// Let worker process for a while
+time.Sleep(time.Second * 3)
+
+// Shutdown the worker
+shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+defer cancel()
+eventWorker.Shutdown(shutdownCtx)
+#+END_SRC
+
+*** Handling different event types
+
+Custom event processing based on event type:
+
+#+BEGIN_SRC go
+func processCustomEvent(ctx context.Context, event data.Event) error {
+    // Type-specific processing
+    switch e := event.(type) {
+    case *data.EventLog:
+        // Process log event
+        logger.Info().
+            Str("event_id", e.GetEventID()).
+            Str("level", e.Level).
+            Str("message", e.Message).
+            Msg("Processing log event")
+        return processLogEvent(ctx, e)
+        
+    case *data.EventMetric:
+        // Process metric event
+        logger.Info().
+            Str("event_id", e.GetEventID()).
+            Float64("value", e.Value).
+            Msg("Processing metric event")
+        return processMetricEvent(ctx, e)
+        
+    default:
+        return fmt.Errorf("unsupported event type: %T", event)
+    }
 }
 #+END_SRC
 
-*** Implementing event processing logic
+*** Graceful worker shutdown
 
-Example of custom event processing logic:
+Example of handling multiple workers during shutdown:
 
 #+BEGIN_SRC go
-package worker
+// Create a worker pool
+workers := make([]*worker.Worker, 3)
+for i := range workers {
+    workers[i] = worker.NewWorker(logger, eventQueue, ctx)
+    go workers[i].Run(ctx)
+}
 
-import (
-	"context"
-	"encoding/json"
-	"time"
+// Handle termination signal
+sigChan := make(chan os.Signal, 1)
+signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+<-sigChan
 
-	"github.com/cybrarymin/behavox/internal/models"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
-)
+// Shutdown all workers with timeout
+shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+defer cancel()
 
-// Custom event processor that can be integrated with the worker
-func customEventProcessor(ctx context.Context, event models.Event) error {
-	ctx, span := otel.Tracer("CustomProcessor.Tracer").Start(ctx, "CustomProcessor.Span")
-	defer span.End()
-
-	// Extract event data based on type
-	switch e := event.(type) {
-	case *models.EventLog:
-		// Process log event
-		if e.Level == "error" {
-			// Special handling for error logs
-			// ...
-		}
-		
-	case *models.EventMetric:
-		// Process metric event
-		if e.Value > 100 {
-			// Handle high metric values
-			// ...
-		}
-		
-	default:
-		// Unknown event type
-		span.SetStatus(codes.Error, "unknown event type")
-		return fmt.Errorf("unknown event type: %T", event)
-	}
-	
-	// Record successful processing
-	span.SetStatus(codes.Ok, "event processed successfully")
-	return nil
+for i, w := range workers {
+    logger.Info().Int("worker", i).Msg("Shutting down worker")
+    if err := w.Shutdown(shutdownCtx); err != nil {
+        logger.Error().Err(err).Int("worker", i).Msg("Worker shutdown failed")
+    }
 }
 #+END_SRC
 
-*** Handling worker shutdown
+*** Monitoring worker performance
 
-Example of handling worker shutdown with timeout:
-
-#+BEGIN_SRC go
-func shutdownWorker(w *worker.Worker) error {
-	// Create a context with a 5-second timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	
-	// Attempt graceful shutdown
-	shutdownErr := w.Shutdown(ctx)
-	if shutdownErr != nil {
-		// If shutdown timed out, log the error
-		log.Printf("Worker shutdown timed out: %v", shutdownErr)
-		
-		// Take more aggressive measures if needed
-		// ...
-	}
-	
-	return shutdownErr
-}
-#+END_SRC
-
-*** Working with metrics
-
-Example of using worker metrics for monitoring:
+Example of basic worker metrics collection:
 
 #+BEGIN_SRC go
-package main
-
-import (
-	"net/http"
-	
-	"github.com/cybrarymin/behavox/api/observability"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+// Create custom metrics for worker monitoring
+successCounter := prometheus.NewCounterVec(
+    prometheus.CounterOpts{
+        Namespace: "worker",
+        Name:      "events_processed_success_total",
+        Help:      "Total successfully processed events",
+    },
+    []string{"event_type"},
 )
 
-func setupMetricsServer() {
-	// Register worker metrics in Prometheus
-	// (This is already done by PromInit)
-	
-	// Create an HTTP server for Prometheus metrics
-	http.Handle("/metrics", promhttp.Handler())
-	
-	// Start the metrics server on port 2112
-	go func() {
-		http.ListenAndServe(":2112", nil)
-	}()
-}
+failureCounter := prometheus.NewCounterVec(
+    prometheus.CounterOpts{
+        Namespace: "worker",
+        Name:      "events_processed_failed_total",
+        Help:      "Total failed processed events",
+    },
+    []string{"event_type"},
+)
 
-// Sample Prometheus queries for monitoring:
-//
-// - Total events processed:
-//   worker_events_processed_total
-//
-// - Success rate:
-//   sum(worker_events_processed_status_total{event_process_status="success"}) / sum(worker_events_processed_total)
-//
-// - Average processing time:
-//   rate(worker_events_processing_duration_seconds_sum[5m]) / rate(worker_events_processing_duration_seconds_count[5m])
-//
-// - Average queue wait time:
-//   rate(queue_wait_time_seconds_sum[5m]) / rate(queue_wait_time_seconds_count[5m])
-//
-// - Error rate by event type:
-//   sum(worker_events_processed_status_total{event_process_status="failed"}) by (event_type)
-//
-// - Retry rate:
-//   rate(worker_events_retry_total[5m])
-#+END_SRC 
+processingDuration := prometheus.NewHistogramVec(
+    prometheus.HistogramOpts{
+        Namespace: "worker",
+        Name:      "processing_duration_seconds",
+        Help:      "Event processing duration in seconds",
+        Buckets:   prometheus.DefBuckets,
+    },
+    []string{"event_type"},
+)
+
+// Register metrics
+prometheus.MustRegister(successCounter, failureCounter, processingDuration)
+
+// Use metrics in custom event processor
+func instrumentedProcessEvent(ctx context.Context, event data.Event) error {
+    eventType := getEventType(event)
+    start := time.Now()
+    
+    err := processEvent(ctx, event)
+    
+    // Record metrics
+    duration := time.Since(start).Seconds()
+    processingDuration.WithLabelValues(eventType).Observe(duration)
+    
+    if err != nil {
+        failureCounter.WithLabelValues(eventType).Inc()
+        return err
+    }
+    
+    successCounter.WithLabelValues(eventType).Inc()
+    return nil
+}
+#+END_SRC

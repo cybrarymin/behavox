@@ -1,48 +1,68 @@
-* Input Validation
+* Validation System
 :PROPERTIES:
 :TOC: :include descendants
 :END:
 
 :CONTENTS:
 - [[#concepts-and-purpose][Concepts and purpose]]
-  - [[#input-validation-system][Input validation system]]
-  - [[#validation-utility-functions][Validation utility functions]]
+  - [[#unified-validation-approach][Unified validation approach]]
+  - [[#error-accumulation][Error accumulation]]
+  - [[#helper-functions][Helper functions]]
+  - [[#api-input-protection][API input protection]]
 - [[#design-and-implementation][Design and implementation]]
   - [[#validator-structure][Validator structure]]
   - [[#validator-methods][Validator methods]]
-  - [[#helper-validation-functions][Helper validation functions]]
+  - [[#validation-helpers][Validation helpers]]
 - [[#usage-examples][Usage examples]]
   - [[#basic-field-validation][Basic field validation]]
-  - [[#validating-request-data][Validating request data]]
-  - [[#combining-multiple-validations][Combining multiple validations]]
+  - [[#validating-api-input][Validating API input]]
+  - [[#complex-validation-rules][Complex validation rules]]
+  - [[#custom-validation-extensions][Custom validation extensions]]
 :END:
 
 ** Concepts and purpose
 
-*** Input validation system
+*** Unified validation approach
 
-- Input validation :: The validation system provides a structured approach to validating input data with:
-  - Centralized error collection :: Accumulates validation errors from multiple checks
-  - Field-specific error messages :: Associates errors with specific input fields
-  - Simple boolean checks :: Uses straightforward boolean conditions for validation rules
-  - First-error-only policy :: Records only the first error for each field
-  This system ensures consistent validation across the API and provides clear feedback to clients about invalid input.
+- Validation framework :: The validator provides a consistent approach to validation across the application:
+  - Centralized validation logic :: Common validation patterns in one place
+  - Reusable validation rules :: Standard rules for common validation scenarios
+  - Consistent error reporting :: Uniform format for validation errors
+  - Declarative syntax :: Simple, readable validation code
+  This consistency improves code quality and maintainability.
 
-*** Validation utility functions
+*** Error accumulation
 
-- Validation helpers :: The package includes utility functions that simplify common validation tasks:
-  - Value presence in a list :: Check if a value exists in a predefined set of options
-  - Regular expression matching :: Validate string format against a pattern
-  - Uniqueness checking :: Ensure all values in a slice are unique
-  These utilities reduce code duplication and standardize validation logic across the application.
+- Error collection :: The validator collects validation errors rather than failing fast:
+  - Multiple error detection :: Finds all validation errors in a single pass
+  - Field-specific errors :: Maps errors to the specific fields that failed validation
+  - First-error policy :: Records only the first error for each field
+  - Complete validation :: Continues validation after finding errors
+  This approach provides comprehensive feedback on validation failures.
+
+*** Helper functions
+
+- Validation utilities :: The package includes helper functions for common validation needs:
+  - Membership checking :: Verifies a value exists in a predefined set
+  - Pattern matching :: Validates string formats against regular expressions
+  - Uniqueness verification :: Ensures all values in a collection are unique
+  These utilities simplify common validation tasks.
+
+*** API input protection
+
+- Input safeguarding :: The validation system protects the API from invalid input:
+  - Data consistency :: Ensures data meets requirements before processing
+  - Attack prevention :: Blocks malformed or malicious input
+  - Clear error feedback :: Provides specific guidance on how to fix input
+  This protection is critical for API security and reliability.
 
 ** Design and implementation
 
 *** Validator structure
 
-- Validator type :: A struct that tracks validation errors
-  - Error collection :: Maps field names to error messages
-  - Simple API :: Provides methods for adding errors and checking validity
+- Validator type :: Encapsulates validation state and errors
+  - Error map :: Maps field names to error messages
+  - Initialization :: Creates a new validator with an empty error map
   #+BEGIN_SRC go
 type Validator struct {
 	Errors map[string]string
@@ -57,9 +77,8 @@ func NewValidator() *Validator {
 
 *** Validator methods
 
-- Valid method :: Determines if any validation errors exist
-  - Returns true if no errors are present
-  - Returns false if one or more errors exist
+- Valid method :: Determines if validation passed
+  - Simple check :: Returns true only if no errors exist
   #+BEGIN_SRC go
 func (v *Validator) Valid() bool {
 	return len(v.Errors) == 0
@@ -67,8 +86,8 @@ func (v *Validator) Valid() bool {
   #+END_SRC
 
 - AddError method :: Adds an error for a specific field
-  - Only adds the error if no error exists for the field yet
-  - Associates a descriptive message with the field name
+  - First-error policy :: Only adds error if no error exists for the field
+  - Field mapping :: Associates the error message with a specific field name
   #+BEGIN_SRC go
 func (v *Validator) AddError(key, message string) {
 	if _, exists := v.Errors[key]; !exists {
@@ -78,8 +97,9 @@ func (v *Validator) AddError(key, message string) {
   #+END_SRC
 
 - Check method :: Performs a validation check and adds an error if it fails
-  - Takes a boolean condition that must be true for valid data
-  - Adds the specified error message if the condition is false
+  - Boolean condition :: Takes a condition that must be true for validation to pass
+  - Error recording :: Adds an error if the condition is false
+  - Fluent interface :: Can be chained with other validation calls
   #+BEGIN_SRC go
 func (v *Validator) Check(ok bool, key, message string) {
 	if !ok {
@@ -88,11 +108,11 @@ func (v *Validator) Check(ok bool, key, message string) {
 }
   #+END_SRC
 
-*** Helper validation functions
+*** Validation helpers
 
 - In function :: Checks if a value exists in a list of options
-  - Returns true if the value matches any of the provided options
-  - Returns false otherwise
+  - Value matching :: Compares the target value against each option
+  - Variadic arguments :: Accepts any number of options to check against
   #+BEGIN_SRC go
 func In(value string, list ...string) bool {
 	for i := range list {
@@ -105,8 +125,7 @@ func In(value string, list ...string) bool {
   #+END_SRC
 
 - Matches function :: Validates a string against a regular expression pattern
-  - Takes a string value and a compiled regexp pattern
-  - Returns true if the string matches the pattern
+  - Pattern validation :: Uses regular expressions for flexible string validation
   #+BEGIN_SRC go
 func Matches(value string, pattern *regexp.Regexp) bool {
 	return pattern.MatchString(value)
@@ -114,9 +133,8 @@ func Matches(value string, pattern *regexp.Regexp) bool {
   #+END_SRC
 
 - Unique function :: Ensures all strings in a slice are unique
-  - Builds a map of unique values from the slice
-  - Compares the map size with the slice length
-  - Returns true if all values are unique
+  - Duplicate detection :: Identifies repeated values in a collection
+  - Set-based algorithm :: Uses a map to efficiently detect duplicates
   #+BEGIN_SRC go
 func Unique(values []string) bool {
 	uniqueValues := make(map[string]bool)
@@ -131,153 +149,172 @@ func Unique(values []string) bool {
 
 *** Basic field validation
 
-Example of validating required fields and value constraints:
+Example of validating simple fields:
 
 #+BEGIN_SRC go
-func validateUser(name, email string, age int) *Validator {
-    // Create a new validator
+// Create a new validator
+v := helpers.NewValidator()
+
+// Validate required fields
+v.Check(name != "", "name", "must be provided")
+v.Check(email != "", "email", "must be provided")
+
+// Validate field constraints
+v.Check(len(name) <= 100, "name", "must not exceed 100 characters")
+v.Check(age >= 18, "age", "must be at least 18 years old")
+
+// Check validation result
+if !v.Valid() {
+    // Handle validation errors
+    for field, msg := range v.Errors {
+        fmt.Printf("Validation error: %s %s\n", field, msg)
+    }
+    return
+}
+
+// Process validated data
+// ...
+#+END_SRC
+
+*** Validating API input
+
+Example of validating API request input:
+
+#+BEGIN_SRC go
+func (api *ApiServer) createEventHandler(w http.ResponseWriter, r *http.Request) {
+    // Parse the request
+    var input struct {
+        EventType string   `json:"event_type"`
+        EventID   string   `json:"event_id"`
+        Value     *float64 `json:"value,omitempty"`
+        Level     *string  `json:"level,omitempty"`
+        Message   *string  `json:"message,omitempty"`
+    }
+    
+    // Read and parse the request body
+    err := helpers.ReadJson(r.Context(), w, r, &input)
+    if err != nil {
+        api.badRequestResponse(w, r, err)
+        return
+    }
+    
+    // Validate the input
     v := helpers.NewValidator()
     
-    // Validate required fields
-    v.Check(name != "", "name", "must be provided")
+    // Validate EventID (must be UUID)
+    _, err = uuid.Parse(input.EventID)
+    if err != nil {
+        api.badRequestResponse(w, r, fmt.Errorf("event_id should be a valid uuid"))
+        return
+    }
+    
+    // Validate event type
+    v.Check(input.EventType != "", "event_type", "must not be empty")
+    v.Check(helpers.In(input.EventType, "log", "metric"), "event_type", "must be either 'log' or 'metric'")
+    
+    // Type-specific validation
+    switch input.EventType {
+    case "log":
+        v.Check(input.Level != nil, "level", "required for log events")
+        v.Check(input.Message != nil, "message", "required for log events")
+        v.Check(input.Value == nil, "value", "not allowed for log events")
+    case "metric":
+        v.Check(input.Value != nil, "value", "required for metric events")
+        v.Check(input.Level == nil, "level", "not allowed for metric events")
+        v.Check(input.Message == nil, "message", "not allowed for metric events")
+    }
+    
+    // Check validation result
+    if !v.Valid() {
+        api.failedValidationResponse(w, r, v.Errors)
+        return
+    }
+    
+    // Process the validated input
+    // ...
+}
+#+END_SRC
+
+*** Complex validation rules
+
+Example of implementing more complex validation rules:
+
+#+BEGIN_SRC go
+// Validate user registration data
+func validateRegistration(username, email, password, confirmPassword string, roles []string) *helpers.Validator {
+    v := helpers.NewValidator()
+    
+    // Username validation
+    v.Check(username != "", "username", "must be provided")
+    v.Check(len(username) >= 3, "username", "must be at least 3 characters")
+    v.Check(len(username) <= 30, "username", "must not exceed 30 characters")
+    usernamePattern := regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+    v.Check(helpers.Matches(username, usernamePattern), "username", "must contain only letters, numbers and underscore")
+    
+    // Email validation
     v.Check(email != "", "email", "must be provided")
+    emailPattern := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+    v.Check(helpers.Matches(email, emailPattern), "email", "must be a valid email address")
     
-    // Validate field constraints
-    v.Check(len(name) <= 100, "name", "must not exceed 100 characters")
-    v.Check(age >= 18, "age", "must be at least 18 years old")
+    // Password validation
+    v.Check(password != "", "password", "must be provided")
+    v.Check(len(password) >= 8, "password", "must be at least 8 characters")
+    v.Check(len(password) <= 72, "password", "must not exceed 72 characters")
+    v.Check(password == confirmPassword, "confirmPassword", "must match password")
     
-    // Validate email format using a regular expression
-    emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
-    v.Check(helpers.Matches(email, emailRegex), "email", "must be a valid email address")
+    // Role validation
+    v.Check(len(roles) > 0, "roles", "must select at least one role")
+    v.Check(helpers.Unique(roles), "roles", "must not contain duplicate roles")
+    
+    // Check each role is valid
+    validRoles := []string{"admin", "user", "editor", "viewer"}
+    for i, role := range roles {
+        fieldName := fmt.Sprintf("roles[%d]", i)
+        v.Check(helpers.In(role, validRoles...), fieldName, "must be a valid role")
+    }
     
     return v
 }
 #+END_SRC
 
-*** Validating request data
+*** Custom validation extensions
 
-Example of validating JSON request data in an HTTP handler:
+Example of extending the validator with custom validation functions:
 
 #+BEGIN_SRC go
-func createProductHandler(w http.ResponseWriter, r *http.Request) {
-    // Define input structure
-    var input struct {
-        Name        string   `json:"name"`
-        Description string   `json:"description"`
-        Price       float64  `json:"price"`
-        Categories  []string `json:"categories"`
-        Status      string   `json:"status"`
-    }
-    
-    // Parse the request body
-    err := helpers.ReadJson(r.Context(), w, r, &input)
-    if err != nil {
-        api.badRequestResponse(w, r, err)
-        return
-    }
-    
-    // Create a validator
-    v := helpers.NewValidator()
-    
-    // Validate the input fields
-    v.Check(input.Name != "", "name", "must be provided")
-    v.Check(len(input.Name) <= 200, "name", "must not exceed 200 characters")
-    
-    v.Check(input.Description != "", "description", "must be provided")
-    v.Check(len(input.Description) <= 1000, "description", "must not exceed 1000 characters")
-    
-    v.Check(input.Price > 0, "price", "must be greater than zero")
-    
-    v.Check(len(input.Categories) > 0, "categories", "must contain at least one category")
-    v.Check(len(input.Categories) <= 5, "categories", "must not have more than 5 categories")
-    v.Check(helpers.Unique(input.Categories), "categories", "must not contain duplicate values")
-    
-    v.Check(helpers.In(input.Status, "draft", "published", "archived"), "status", 
-            "must be one of: draft, published, archived")
-    
-    // Return 422 Unprocessable Entity if validation fails
-    if !v.Valid() {
-        api.failedValidationResponse(w, r, v.Errors)
-        return
-    }
-    
-    // Process the valid input
-    // ...
+// Check if a string contains at least one uppercase letter, lowercase letter, and digit
+func ContainsRequiredCharTypes(s string) bool {
+    hasUpper := regexp.MustCompile(`[A-Z]`).MatchString(s)
+    hasLower := regexp.MustCompile(`[a-z]`).MatchString(s)
+    hasDigit := regexp.MustCompile(`[0-9]`).MatchString(s)
+    return hasUpper && hasLower && hasDigit
 }
-#+END_SRC
 
-*** Combining multiple validations
+// Check if a date is in the future
+func IsFutureDate(date time.Time) bool {
+    return date.After(time.Now())
+}
 
-Example of combining validations from different sources:
+// Check if a date is within a specified range
+func IsDateInRange(date time.Time, minDays, maxDays int) bool {
+    now := time.Now()
+    minDate := now.AddDate(0, 0, minDays)
+    maxDate := now.AddDate(0, 0, maxDays)
+    return date.After(minDate) && date.Before(maxDate)
+}
 
-#+BEGIN_SRC go
-func updateUserHandler(w http.ResponseWriter, r *http.Request) {
-    // Parse user ID from request path
-    userID := r.PathValue("id")
-    
-    // Parse the request body
-    var input struct {
-        Name     *string  `json:"name"`
-        Email    *string  `json:"email"`
-        Roles    []string `json:"roles"`
-        Password *string  `json:"password"`
-    }
-    
-    err := helpers.ReadJson(r.Context(), w, r, &input)
-    if err != nil {
-        api.badRequestResponse(w, r, err)
-        return
-    }
-    
-    // Create a validator
+// Example usage of custom validators
+func validateEvent(eventName, description string, eventDate time.Time) *helpers.Validator {
     v := helpers.NewValidator()
     
-    // Validate optional fields if they are provided
-    if input.Name != nil {
-        v.Check(len(*input.Name) > 0, "name", "must not be empty if provided")
-        v.Check(len(*input.Name) <= 100, "name", "must not exceed 100 characters")
-    }
+    // Basic validation
+    v.Check(eventName != "", "eventName", "must be provided")
+    v.Check(len(eventName) <= 100, "eventName", "must not exceed 100 characters")
     
-    if input.Email != nil {
-        v.Check(len(*input.Email) > 0, "email", "must not be empty if provided")
-        emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
-        v.Check(helpers.Matches(*input.Email, emailRegex), "email", "must be a valid email address")
-    }
+    // Use custom validators
+    v.Check(IsFutureDate(eventDate), "eventDate", "must be in the future")
+    v.Check(IsDateInRange(eventDate, 1, 90), "eventDate", "must be between tomorrow and 90 days from now")
     
-    if input.Roles != nil {
-        v.Check(len(input.Roles) > 0, "roles", "must contain at least one role")
-        validRoles := []string{"admin", "user", "editor", "viewer"}
-        
-        for i, role := range input.Roles {
-            v.Check(helpers.In(role, validRoles...), fmt.Sprintf("roles[%d]", i),
-                    "must be one of: admin, user, editor, viewer")
-        }
-        v.Check(helpers.Unique(input.Roles), "roles", "must not contain duplicate values")
-    }
-    
-    if input.Password != nil {
-        v.Check(len(*input.Password) >= 8, "password", "must be at least 8 characters long")
-        v.Check(len(*input.Password) <= 72, "password", "must not exceed 72 characters")
-    }
-    
-    // Combine validation with database checks
-    if input.Email != nil && v.Valid() {
-        // Check if email is already taken by another user
-        exists, err := db.EmailExists(*input.Email, userID)
-        if err != nil {
-            api.serverErrorResponse(w, r, err)
-            return
-        }
-        v.Check(!exists, "email", "this email is already in use")
-    }
-    
-    // Return 422 Unprocessable Entity if validation fails
-    if !v.Valid() {
-        api.failedValidationResponse(w, r, v.Errors)
-        return
-    }
-    
-    // Process the valid input
-    // ...
+    return v
 }
 #+END_SRC
