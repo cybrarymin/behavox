@@ -40,7 +40,7 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&api.CmdLogLevelFlag, "log-level", "info", "loglevel. possible values are debug, info, warn, error, fatal, panic, and trace")
-	rootCmd.PersistentFlags().StringVar(&api.CmdHTTPSrvListenAddr, "listen-addr", "https://0.0.0.0:443", "listen address for the http/https service")
+	rootCmd.PersistentFlags().StringVar(&api.CmdHTTPSrvListenAddr, "listen-addr", "http://0.0.0.0:80", "listen address for the http/https service")
 	rootCmd.PersistentFlags().StringVar(&observ.CmdJaegerHostFlag, "jeager-host", "localhost", "Jaeger/jaeger-collector server address for sending opentelemetry traces")
 	rootCmd.PersistentFlags().StringVar(&observ.CmdJaegerPortFlag, "jeager-port", "5317", "Jaeger/jaeger-collector server port for sending opentelemetry traces")
 	rootCmd.PersistentFlags().DurationVar(&observ.CmdJaegerConnectionTimeout, "jeager-conn-timeout", time.Second*5, "connection will fail if it couldn't be established to jaeger host within this time")
@@ -53,8 +53,8 @@ func init() {
 	rootCmd.Flags().Int64Var(&api.CmdGlobalRateLimit, "global-request-rate-limit", 25, "used to apply rate limiting to total number of requests coming to the api server. 10% of the specified value will be considered as the burst limit for total number of requests")
 	rootCmd.Flags().Int64Var(&api.CmdPerClientRateLimit, "per-client-rate-limit", 2, "used to apply rate limiting to per client number of requests coming to the api server. 10% of the specified value will be considered as the burst limit for total number of requests")
 	rootCmd.Flags().BoolVar(&api.CmdEnableRateLimit, "enable-rate-limit", false, "enable rate limiting")
-	rootCmd.Flags().StringVar(&api.CmdApiAdmin, "api-admin-user", "123412341234", "api admin user for basic authentication and token issueing")
-	rootCmd.Flags().StringVar(&api.CmdApiAdminPass, "api-admin-pass", "behvaox-admin", "api admin password for basic authentication and token issuing ")
+	rootCmd.Flags().StringVar(&api.CmdApiAdmin, "api-admin-user", "behavox-pass", "api admin user for basic authentication and token issueing")
+	rootCmd.Flags().StringVar(&api.CmdApiAdminPass, "api-admin-pass", "behavox-admin", "api admin password for basic authentication and token issuing ")
 	rootCmd.Flags().StringVar(&api.CmdJwtKey, "jwkey", "defaultJWTToken", "jwt key for signing and verifying the issued jwt token")
 	rootCmd.Flags().Int64Var(&data.CmdEventQueueSize, "event-queue-size", 100, "event queue size")
 	rootCmd.Flags().IntVar(&worker.CmdmaxWorkerGoroutines, "event-queue-max-worker-threads", 5, "number of threds worker is allowed to create to process the events")

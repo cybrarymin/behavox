@@ -47,4 +47,4 @@ if [ -z $TOKEN ] || [[ $TOKEN == *"error"* ]]; then
     exit 1
 fi
 
-curl -k -X POST -H "Authorization: Bearer $TOKEN" "$API_URL" -H "Content-Type: application/json" -d "$JSON_PAYLOAD" && curl -k -X POST -H "Authorization: Bearer $TOKEN" "$API_URL" -H "Content-Type: application/json" -d "$JSON_PAYLOAD"
+curl -k -X POST -H "Authorization: Bearer $TOKEN" "$API_URL" -H "Content-Type: application/json" -d "$JSON_PAYLOAD"

@@ -1,0 +1,80 @@
+name: buidling and pushing exporter image
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+env:
+  DOCKER_REGISTRY_USERNAME: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+  DOCKER_REGISTRY_PASS: ${{ secrets.DOCKER_REGISTRY_PASS }}
+
+jobs:
+  conditional_job:
+    runs-on: 'ubuntu-latest'
+    outputs:
+      file_changed: ${{ steps.check_file_changed.outputs.changed }}
+    
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+    
+    - name: check_file_changed
+      id: check_file_changed
+      run: |
+        output=`git diff --name-only HEAD^ HEAD | grep -E "(Dockerfile|.*.go|Makefile|.envrc|workflows)" || true`
+        echo "tshoot:$output"
+        if [ -z `echo -n $output` ]
+        then 
+          echo "changed=false" >> $GITHUB_OUTPUT; 
+        else
+          echo "changed=true" >> $GITHUB_OUTPUT; 
+        fi
+
+  audit:
+    needs: conditional_job
+    if: needs.conditional_job.outputs.file_changed != 'false'
+    name: Run Code Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.24.2
+
+      - name: Run Code Audit
+        run: make audit
+
+  build-and-push:
+  
+    name: Build and Push Docker Image
+    needs: [audit, conditional_job]  # Ensures audit passes before building
+    if: needs.conditional_job.outputs.file_changed != 'false'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.24.2
+
+      - name: Build the Golang Application
+        run: make build/exporter/dockerImage DOCKER_IMAGENAME="${{ vars.DOCKER_IMAGE_NAME }}"
+
+      - name: Log in to docker registry
+        run: docker login -u $DOCKER_REGISTRY_USERNAME -p $DOCKER_REGISTRY_PASS
+
+      - name: Tag and Push Docker Image
+        run: |
+          IMAGE_TAG=`docker image ls | grep -i polkaexporter | awk 'BEGIN{FS=" "}{print$2}'`
+          docker push "${{ vars.DOCKER_IMAGE_NAME }}:$IMAGE_TAG"

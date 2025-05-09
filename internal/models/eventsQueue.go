@@ -3,7 +3,6 @@ package data
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -15,7 +14,6 @@ var (
 
 type EventQueue struct {
 	Capacity int64
-	mu       sync.RWMutex
 	Events   chan Event
 }
 

@@ -44,6 +44,14 @@ build/api:
 	GOOS=darwin GOARCH=arm64 go build -ldflags="${Linkerflags}" -o=./bin/behavox-darwin-arm64 ./
 	go build -o=./bin/behavox-local-compatible -ldflags="${Linkerflags}" ./
 
+
+.PHONY: build/api/dockerImage
+## build/api/dockerImage: building the docker image of the the application
+build/api/dockerImage:
+	@docker build --build-arg Linkerflags="${Linkerflags}" -t "${DOCKER_IMAGENAME}":"${git_version}" ./
+
+
+
 ## run/api: runs the application on port 443 with custom self signed certificate
 .PHONY: run/api
 run/api:
