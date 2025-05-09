@@ -1,4 +1,4 @@
-* API Server Initialization and Lifecycle
+* API Server Initialization
 :PROPERTIES:
 :TOC: :include descendants
 :END:
@@ -6,67 +6,79 @@
 :CONTENTS:
 - [[#concepts-and-purpose][Concepts and purpose]]
   - [[#application-entry-point][Application entry point]]
-  - [[#worker-and-event-processing][Worker and event processing]]
-  - [[#graceful-shutdown-mechanism][Graceful shutdown mechanism]]
+  - [[#component-initialization][Component initialization]]
+  - [[#server-configuration][Server configuration]]
+  - [[#graceful-shutdown][Graceful shutdown]]
 - [[#design-and-implementation][Design and implementation]]
-  - [[#command-line-flags][Command line flags]]
+  - [[#command-line-configuration][Command line configuration]]
   - [[#logger-initialization][Logger initialization]]
-  - [[#observability-setup][Observability setup]]
-  - [[#event-queue-and-worker-initialization][Event queue and worker initialization]]
+  - [[#opentelemetry-setup][OpenTelemetry setup]]
+  - [[#event-queue-and-models-initialization][Event queue and models initialization]]
+  - [[#worker-initialization][Worker initialization]]
+  - [[#prometheus-metrics-setup][Prometheus metrics setup]]
   - [[#server-configuration-and-validation][Server configuration and validation]]
-  - [[#server-initialization-and-startup][Server initialization and startup]]
-  - [[#graceful-shutdown-implementation][Graceful shutdown implementation]]
+  - [[#http-server-setup][HTTP server setup]]
+  - [[#shutdown-handler][Shutdown handler]]
+  - [[#server-startup][Server startup]]
 - [[#usage-examples][Usage examples]]
-  - [[#command-line-execution][Command line execution]]
-  - [[#handling-background-tasks][Handling background tasks]]
-  - [[#shutdown-hook-registration][Shutdown hook registration]]
+  - [[#running-the-server][Running the server]]
+  - [[#server-startup-with-custom-configuration][Server startup with custom configuration]]
+  - [[#implementing-custom-shutdown-handlers][Implementing custom shutdown handlers]]
+  - [[#extending-initialization-sequence][Extending initialization sequence]]
 :END:
 
 ** Concepts and purpose
 
 *** Application entry point
 
-- Application entry point :: The `Main` function serves as the entry point for the API server application. It is responsible for:
-  - Initializing core components :: Setting up the logger, OpenTelemetry, and Prometheus metrics
-  - Creating the event queue and worker :: Setting up the event processing pipeline
-  - Configuring the server :: Creating and validating the API server configuration
-  - Starting the HTTP server :: Launching the server with the appropriate protocol (HTTP/HTTPS)
-  - Handling shutdown :: Ensuring graceful termination when the application receives shutdown signals
-  The entry point coordinates all aspects of the application lifecycle from startup to shutdown, ensuring proper resource initialization and cleanup.
+- Entry point :: The `Main` function serves as the primary entry point for the API server:
+  - Orchestrates initialization :: Coordinates the initialization of all components
+  - Configures components :: Applies configuration from command line flags
+  - Creates dependencies :: Instantiates and wires together system components
+  - Manages lifecycle :: Ensures orderly startup and shutdown
+  This function brings together all parts of the application and manages their relationships.
 
-*** Worker and event processing
+*** Component initialization
 
-- Event processing pipeline :: The application includes an event processing system that:
-  - Provides an event queue :: For buffering events before processing
-  - Runs a worker process :: To consume and process events asynchronously
-  - Integrates with metrics :: For monitoring queue and worker performance
-  - Handles graceful shutdown :: To ensure all events are processed before termination
-  This event processing system enables asynchronous handling of various event types with proper monitoring and error handling.
+- Component initialization :: The main function initializes several core components:
+  - Logger :: Sets up structured logging with appropriate level
+  - OpenTelemetry :: Configures distributed tracing
+  - Event queue :: Creates the queue for event processing
+  - Worker :: Initializes the background worker for processing events
+  - Prometheus :: Sets up metrics collection
+  - API server :: Creates and configures the HTTP server
+  The initialization sequence ensures proper dependency management and configuration.
 
-*** Graceful shutdown mechanism
+*** Server configuration
 
-- Graceful shutdown :: The API server implements a graceful shutdown mechanism that:
-  - Captures termination signals :: Listens for SIGTERM, SIGINT, and SIGQUIT signals
-  - Executes shutdown functions :: Runs all registered shutdown functions in sequence, including server and worker shutdown
-  - Waits for background tasks :: Ensures all background tasks complete before termination
-  - Provides status reporting :: Reports successful or failed shutdown via a channel
-  This mechanism ensures that the server closes active connections properly, completes in-flight requests, processes remaining events, and releases all resources before termination.
+- Server configuration :: The main function configures the server based on command line flags:
+  - HTTP/HTTPS :: Determines protocol based on configuration
+  - TLS settings :: Configures certificate and key files for HTTPS
+  - Timeouts :: Sets read, write, and idle timeouts
+  - Rate limiting :: Configures global and per-client rate limiting
+  - Validation :: Validates configuration before server startup
+  This configuration ensures the server operates correctly according to requirements.
+
+*** Graceful shutdown
+
+- Graceful shutdown :: The implementation includes a graceful shutdown mechanism:
+  - Signal handling :: Catches termination signals (SIGTERM, SIGINT, SIGQUIT)
+  - Shutdown sequence :: Executes a controlled shutdown sequence
+  - Component cleanup :: Ensures all components are properly shut down
+  - Timeout handling :: Adds timeout to prevent indefinite shutdown
+  - Background task completion :: Waits for all background tasks to complete
+  This ensures proper resource cleanup and completion of in-flight work during shutdown.
 
 ** Design and implementation
 
-*** Command line flags
+*** Command line configuration
 
-- Command line parameters :: The application uses command line flags to configure its behavior
-  | ~CmdLogLevelFlag~        | Logging level for the application |
-  | ~CmdHTTPSrvListenAddr~   | HTTP server listen address and port |
-  | ~CmdHTTPSrvReadTimeout~  | Maximum time allowed to read client request |
-  | ~CmdHTTPSrvWriteTimeout~ | Maximum time allowed to write response |
-  | ~CmdHTTPSrvIdleTimeout~  | Maximum time connection can be idle |
-  | ~CmdTlsCertFile~         | Path to TLS certificate file |
-  | ~CmdTlsKeyFile~          | Path to TLS key file |
-  | ~CmdGlobalRateLimit~     | Maximum global requests per second |
-  | ~CmdPerClientRateLimit~  | Maximum requests per second per client |
-  | ~CmdEnableRateLimit~     | Flag to enable/disable rate limiting |
+- Command line flags :: The main package declares variables for command line flags
+  - Server settings :: Address, timeouts, TLS configuration
+  - Rate limiting :: Global and per-client rate limits
+  - Logging :: Log level configuration
+  - OpenTelemetry :: Jaeger configuration for tracing
+  These variables are populated from command line flags by the cobra framework.
   #+BEGIN_SRC go
 var (
 	CmdLogLevelFlag        string
@@ -84,10 +96,12 @@ var (
 
 *** Logger initialization
 
-- Logger setup :: Initializes a structured logger with the appropriate log level
-  - Configures stack traces for error logging when needed
-  - Sets the log level based on command line flags
-  - Adds timestamps to all log entries
+- Logger setup :: Initializes the zerolog logger with appropriate configuration
+  - Log level configuration :: Uses command line flag for log level
+  - Stack traces :: Enables stack traces for error logging when in trace mode
+  - Timestamp :: Adds timestamps to all log entries
+  - Error marshaling :: Configures error stack marshaling
+  The logger is used throughout the application for consistent logging.
   #+BEGIN_SRC go
 // initializing the logger with respect to the specified loglevel option
 var nlogger zerolog.Logger
@@ -100,12 +114,13 @@ if zerolog.LevelTraceValue == CmdLogLevelFlag {
 }
   #+END_SRC
 
-*** Observability setup
+*** OpenTelemetry setup
 
-- Observability initialization :: Sets up OpenTelemetry and Prometheus for monitoring and tracing
-  - Configures Jaeger for distributed tracing
-  - Sets up Prometheus metrics collection
-  - Returns a shutdown function for clean resource release
+- Tracing configuration :: Sets up OpenTelemetry for distributed tracing
+  - Jaeger configuration :: Configures connection to Jaeger for trace collection
+  - Error handling :: Handles setup failures appropriately
+  - Shutdown registration :: Registers the shutdown function for cleanup
+  OpenTelemetry provides tracing capabilities throughout the application.
   #+BEGIN_SRC go
 // initialize opentelemetry
 otelShut, err := observ.SetupOTelSDK(ctx, observ.CmdJaegerHostFlag, observ.CmdJaegerPortFlag, observ.CmdJaegerConnectionTimeout, observ.CmdSpanExportInterval)
@@ -115,36 +130,53 @@ if err != nil {
 }
   #+END_SRC
 
-*** Event queue and worker initialization
+*** Event queue and models initialization
 
-- Event queue and worker setup :: Creates and initializes the event queue and worker components
-  - Creates a new event queue for buffering events
-  - Initializes the models structure with the event queue
-  - Creates a new worker instance for processing events
-  - Starts the worker in a background goroutine
-  - Initializes Prometheus metrics with the event queue
+- Queue and models setup :: Creates the event queue and models structure
+  - Queue creation :: Initializes the event queue with configured capacity
+  - Models initialization :: Creates the models structure with the queue
+  The queue and models provide the core data structures for the application.
   #+BEGIN_SRC go
 // initialize the models so apiServer can have access to the models and eventQueue system
 eq := data.NewEventQueue()
 nModel := data.NewModels(eq, nil, nil)
+  #+END_SRC
 
+*** Worker initialization
+
+- Worker setup :: Initializes the worker for processing events
+  - Worker creation :: Creates the worker with logger, queue, and context
+  - Background execution :: Starts the worker in a background goroutine
+  - Panic recovery :: Adds panic recovery for the worker goroutine
+  The worker handles asynchronous processing of events from the queue.
+  #+BEGIN_SRC go
 // initialize and run worker node
 nWorker := worker.NewWorker(&nlogger, eq, ctx)
 helpers.BackgroundJob(func() {
 	nWorker.Run(ctx)
 }, &nlogger, "new worker paniced during consuming events")
+  #+END_SRC
 
+*** Prometheus metrics setup
+
+- Metrics initialization :: Sets up Prometheus metrics
+  - Metrics registration :: Registers metrics with Prometheus
+  - Version tagging :: Sets application version in metrics
+  - Queue integration :: Connects metrics to the event queue
+  Prometheus provides monitoring capabilities for the application.
+  #+BEGIN_SRC go
 // initialize the prometheus
 observ.PromInit(eq, Version)
   #+END_SRC
 
 *** Server configuration and validation
 
-- Configuration and validation :: Creates and validates the API server configuration
-  - Parses the listen address URL
-  - Creates a new API server configuration
-  - Validates all configuration parameters
-  - Logs and exits on validation errors
+- Configuration creation and validation :: Creates and validates the API server configuration
+  - URL parsing :: Parses the listen address URL
+  - Configuration creation :: Creates a new API server configuration
+  - Validation :: Validates all configuration settings
+  - Error handling :: Logs and exits on validation failures
+  Validation ensures the server is properly configured before startup.
   #+BEGIN_SRC go
 // initializing new validator to be used for input validation of cmdOptions
 nVal := helpers.NewValidator()
@@ -173,15 +205,15 @@ if !nApiCfg.validation(*nVal).Valid() {
 }
   #+END_SRC
 
-*** Server initialization and startup
+*** HTTP server setup
 
-- Server creation and startup :: Initializes and starts the HTTP server
-  - Creates the API server instance with models
-  - Configures the HTTP server with appropriate timeouts
-  - Sets up routes and handlers
-  - Starts graceful shutdown handler including worker shutdown
-  - Starts the server with TLS if HTTPS is configured
-  - Logs server startup information
+- Server initialization :: Creates and configures the HTTP server
+  - API server creation :: Creates the API server with configuration, logger, and models
+  - HTTP server creation :: Creates a standard Go HTTP server
+  - Timeout configuration :: Sets read, write, and idle timeouts
+  - Handler setup :: Configures the request routing
+  - Error logging :: Sets up error logging for the HTTP server
+  The HTTP server handles incoming API requests.
   #+BEGIN_SRC go
 nApi := NewApiServer(nApiCfg, &nlogger, nModel)
 nSrv := http.Server{
@@ -192,10 +224,30 @@ nSrv := http.Server{
 	IdleTimeout:  nApi.Cfg.ServerIdleTimeout,
 	ErrorLog:     log.New(nApi.Logger, "", 0),
 }
+  #+END_SRC
 
+*** Shutdown handler
+
+- Graceful shutdown setup :: Prepares for graceful shutdown
+  - Channel creation :: Creates a channel for shutdown errors
+  - Handler goroutine :: Starts a goroutine for handling shutdown signals
+  - Shutdown functions :: Registers server, worker, and OpenTelemetry shutdown functions
+  The shutdown handler ensures orderly termination of the application.
+  #+BEGIN_SRC go
 shutdownChan := make(chan error)
 go gracefulShutdown(nApi, &nlogger, shutdownChan, nSrv.Shutdown, nWorker.Shutdown, otelShut)
+  #+END_SRC
 
+*** Server startup
+
+- Server startup :: Starts the HTTP server with the appropriate protocol
+  - Protocol selection :: Uses HTTP or HTTPS based on configuration
+  - TLS configuration :: Sets certificate and key files for HTTPS
+  - Error handling :: Handles startup failures
+  - Shutdown waiting :: Waits for shutdown signal
+  - Error reporting :: Reports any shutdown errors
+  The server startup initiates the request handling loop.
+  #+BEGIN_SRC go
 if nApi.Cfg.ListenAddr.Scheme == "https" {
 	nlogger.Info().Msgf("starting the server on %s over %s", nApi.Cfg.ListenAddr.Host, nApi.Cfg.ListenAddr.Scheme)
 	err := nSrv.ListenAndServeTLS(nApi.Cfg.TlsCertFile, nApi.Cfg.TlsKeyFile)
@@ -220,14 +272,15 @@ if err != nil {
 
 *** Graceful shutdown implementation
 
-- Graceful shutdown process :: The `gracefulShutdown` function handles clean server termination
-  - Sets up a signal channel to catch OS termination signals
-  - Logs when a termination signal is received
-  - Creates a timeout context for shutdown operations
-  - Executes all registered shutdown functions including worker shutdown
-  - Waits for background tasks to complete
-  - Signals successful or failed shutdown via a channel
+- Shutdown function :: The `gracefulShutdown` function implements the shutdown process
+  - Signal handling :: Catches termination signals (SIGTERM, SIGINT, SIGQUIT)
+  - Shutdown execution :: Executes registered shutdown functions
+  - Timeout context :: Creates a context with timeout for shutdown
+  - Background task waiting :: Waits for background tasks to complete
+  - Completion notification :: Signals shutdown completion
+  The graceful shutdown ensures all resources are properly released.
   #+BEGIN_SRC go
+// gracefulShitdown catches the terminate, quit, interrupt signals and closes the connection gracefully
 func gracefulShutdown(api *ApiServer, logger *zerolog.Logger, shutdownChan chan error, shutdownFuncs ...func(context.Context) error) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
@@ -259,67 +312,35 @@ func gracefulShutdown(api *ApiServer, logger *zerolog.Logger, shutdownChan chan 
 
 ** Usage examples
 
-*** Command line execution
+*** Running the server
 
-Example of running the application with command line flags:
+Example of running the server with default configuration:
 
-#+BEGIN_SRC sh
-# Run with default settings
-./myapp serve
+#+BEGIN_SRC bash
+# Build the application
+go build -o api-server .
 
-# Run with custom settings
-./myapp serve \
-  --log-level=info \
-  --http-listen-addr=:8081 \
-  --read-timeout=5s \
-  --write-timeout=10s \
-  --idle-timeout=120s \
-  --enable-rate-limit \
-  --global-rate-limit=100 \
-  --per-client-rate-limit=10
+# Run with defaults
+./api-server
+
+# Run with custom configuration
+./api-server \
+  --log-level=debug \
+  --listen-addr=https://0.0.0.0:8443 \
+  --cert=/path/to/cert.pem \
+  --cert-key=/path/to/key.pem \
+  --srv-read-timeout=5s \
+  --srv-write-timeout=10s \
+  --srv-idle-timeout=60s \
+  --enable-rate-limit=true \
+  --global-request-rate-limit=100 \
+  --per-client-rate-limit=10 \
+  --event-queue-size=1000
 #+END_SRC
 
-*** Handling background tasks
+*** Server startup with custom configuration
 
-Example of running background tasks with proper tracking:
-
-#+BEGIN_SRC go
-package main
-
-import (
-	"github.com/cybrarymin/behavox/api"
-	"github.com/cybrarymin/behavox/internal"
-	"github.com/rs/zerolog"
-)
-
-func runBackgroundTask(logger *zerolog.Logger, api *api.ApiServer) {
-	// Register the task with the wait group
-	api.Wg.Add(1)
-	
-	// Run the task in a goroutine
-	go func() {
-		// Ensure the wait group is decremented when done
-		defer api.Wg.Done()
-		
-		// Task logic here
-		// ...
-		
-		logger.Info().Msg("Background task completed")
-	}()
-}
-
-// Using the helper function to run a background job with panic recovery
-func safeBackgroundTask(logger *zerolog.Logger) {
-	internal.BackgroundJob(func() {
-		// Task logic here
-		// ...
-	}, logger, "background task panicked")
-}
-#+END_SRC
-
-*** Shutdown hook registration
-
-Example of registering shutdown hooks:
+Example of starting the server with custom configuration in Go:
 
 #+BEGIN_SRC go
 package main
@@ -327,34 +348,350 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"os"
 	"time"
 	
 	"github.com/cybrarymin/behavox/api"
+	"github.com/cybrarymin/behavox/internal/models"
+	"github.com/rs/zerolog"
 )
 
-func registerShutdownHooks() {
-	// Define shutdown functions that implement the required signature
-	httpServerShutdown := func(ctx context.Context) error {
-		fmt.Println("Shutting down HTTP server...")
-		// Close connections, etc.
-		return nil
+func main() {
+	// Create a context for the application
+	ctx := context.Background()
+	
+	// Initialize logger
+	logger := zerolog.New(os.Stdout).With().Timestamp().Logger().Level(zerolog.InfoLevel)
+	
+	// Parse listen address
+	listenAddr, err := url.Parse("http://localhost:8080")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("invalid listen address")
 	}
 	
-	databaseShutdown := func(ctx context.Context) error {
+	// Create API server configuration
+	apiCfg := api.NewApiServerCfg(
+		listenAddr,                // Listen address
+		"",                        // TLS cert file (empty for HTTP)
+		"",                        // TLS key file (empty for HTTP)
+		true,                      // Enable rate limiting
+		100,                       // Global rate limit
+		10,                        // Per-client rate limit
+		time.Second*5,             // Read timeout
+		time.Second*120,           // Idle timeout
+		time.Second*10,            // Write timeout
+	)
+	
+	// Validate configuration
+	validator := helpers.NewValidator()
+	if !apiCfg.validation(*validator).Valid() {
+		for key, errMsg := range validator.Errors {
+			logger.Fatal().Str("field", key).Msg(errMsg)
+		}
+	}
+	
+	// Create event queue and models
+	models.CmdEventQueueSize = 100
+	eventQueue := models.NewEventQueue()
+	appModels := models.NewModels(eventQueue, nil, nil)
+	
+	// Create API server
+	apiServer := api.NewApiServer(apiCfg, &logger, appModels)
+	
+	// Initialize HTTP server
+	httpServer := &http.Server{
+		Addr:         apiCfg.ListenAddr.Host,
+		Handler:      apiServer.routes(),
+		ReadTimeout:  apiCfg.ServerReadTimeout,
+		WriteTimeout: apiCfg.ServerWriteTimeout,
+		IdleTimeout:  apiCfg.ServerIdleTimeout,
+	}
+	
+	// Start HTTP server
+	logger.Info().Str("addr", httpServer.Addr).Msg("Starting HTTP server")
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Fatal().Err(err).Msg("Server failed to start")
+	}
+}
+#+END_SRC
+
+*** Implementing custom shutdown handlers
+
+Example of implementing custom shutdown handlers:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+	
+	"github.com/rs/zerolog"
+)
+
+// Custom shutdown handler for a database connection
+func databaseShutdown(db *Database) func(context.Context) error {
+	return func(ctx context.Context) error {
 		fmt.Println("Closing database connections...")
-		// Close database connections
-		time.Sleep(100 * time.Millisecond) // Simulate work
-		return nil
+		
+		// Create a done channel to signal completion
+		done := make(chan struct{})
+		
+		go func() {
+			// Close connections
+			db.Close()
+			close(done)
+		}()
+		
+		// Wait for completion or timeout
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("database shutdown timed out: %w", ctx.Err())
+		case <-done:
+			fmt.Println("Database connections closed successfully")
+			return nil
+		}
 	}
-	
-	cacheShutdown := func(ctx context.Context) error {
+}
+
+// Custom shutdown handler for a cache system
+func cacheShutdown(cache *Cache) func(context.Context) error {
+	return func(ctx context.Context) error {
 		fmt.Println("Flushing cache...")
-		// Flush cache to persistent storage
-		return nil
+		
+		// Create a done channel to signal completion
+		done := make(chan error)
+		
+		go func() {
+			// Flush cache to persistent storage
+			err := cache.Flush()
+			done <- err
+		}()
+		
+		// Wait for completion or timeout
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cache shutdown timed out: %w", ctx.Err())
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("cache flush failed: %w", err)
+			}
+			fmt.Println("Cache flushed successfully")
+			return nil
+		}
+	}
+}
+
+// Example usage with custom graceful shutdown
+func customGracefulShutdown(logger *zerolog.Logger, shutdownChan chan error, shutdownFuncs ...func(context.Context) error) {
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
+	sig := <-sigChan
+	
+	logger.Warn().Str("signal", sig.String()).Msg("Received termination signal")
+	
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	// Execute all shutdown functions
+	for i, shutdownFunc := range shutdownFuncs {
+		logger.Info().Int("function", i+1).Msg("Executing shutdown function")
+		if err := shutdownFunc(ctx); err != nil {
+			logger.Error().Err(err).Int("function", i+1).Msg("Shutdown function failed")
+			shutdownChan <- err
+			return
+		}
 	}
 	
-	// In the real application, these would be passed to gracefulShutdown
-	// For example:
-	// go gracefulShutdown(api, logger, shutdownChan, httpServerShutdown, databaseShutdown, cacheShutdown)
+	logger.Info().Msg("All shutdown functions completed successfully")
+	shutdownChan <- nil
+}
+
+func main() {
+	// Initialize components
+	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	db := NewDatabase()
+	cache := NewCache()
+	server := &http.Server{Addr: ":8080"}
+	
+	// Create shutdown channel
+	shutdownChan := make(chan error, 1)
+	
+	// Register custom shutdown handlers
+	go customGracefulShutdown(
+		&logger,
+		shutdownChan,
+		func(ctx context.Context) error { return server.Shutdown(ctx) },
+		databaseShutdown(db),
+		cacheShutdown(cache),
+	)
+	
+	// Start server
+	logger.Info().Msg("Starting server")
+	if err := server.ListenAndServe(); err != http.ErrServerClosed {
+		logger.Error().Err(err).Msg("Server failed")
+		return
+	}
+	
+	// Wait for shutdown to complete
+	if err := <-shutdownChan; err != nil {
+		logger.Error().Err(err).Msg("Shutdown failed")
+		os.Exit(1)
+	}
+	
+	logger.Info().Msg("Server shutdown complete")
+}
+#+END_SRC
+
+*** Extending initialization sequence
+
+Example of extending the initialization sequence:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"context"
+	"net/http"
+	"os"
+	
+	"github.com/cybrarymin/behavox/api"
+	"github.com/cybrarymin/behavox/internal/models"
+	"github.com/rs/zerolog"
+)
+
+// Extended initialization
+func startServer() error {
+	// Create context
+	ctx := context.Background()
+	
+	// Initialize logger
+	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	
+	// Load configuration from environment
+	config, err := loadConfigFromEnv()
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to load configuration")
+		return err
+	}
+	
+	// Initialize database
+	db, err := initDatabase(config.DatabaseURL)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to initialize database")
+		return err
+	}
+	
+	// Initialize cache
+	cache, err := initCache(config.CacheURL)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to initialize cache")
+		return err
+	}
+	
+	// Initialize event queue
+	models.CmdEventQueueSize = config.QueueSize
+	eventQueue := models.NewEventQueue()
+	
+	// Initialize models with database and cache
+	appModels := models.NewModels(eventQueue, db, cache)
+	
+	// Initialize worker
+	worker := worker.NewWorker(&logger, eventQueue, ctx)
+	
+	// Start worker
+	helpers.BackgroundJob(func() {
+		worker.Run(ctx)
+	}, &logger, "Worker failed")
+	
+	// Initialize metrics
+	observ.PromInit(eventQueue, config.Version)
+	
+	// Initialize OpenTelemetry
+	otelShut, err := observ.SetupOTelSDK(ctx, config.JaegerHost, config.JaegerPort, config.JaegerTimeout, config.SpanExportInterval)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to initialize OpenTelemetry")
+		return err
+	}
+	
+	// Initialize API server
+	apiConfig := api.NewApiServerCfg(
+		config.ListenAddr,
+		config.TLSCert,
+		config.TLSKey,
+		config.EnableRateLimit,
+		config.GlobalRateLimit,
+		config.PerClientRateLimit,
+		config.ReadTimeout,
+		config.IdleTimeout,
+		config.WriteTimeout,
+	)
+	
+	// Validate configuration
+	validator := helpers.NewValidator()
+	if !apiConfig.validation(*validator).Valid() {
+		for key, errMsg := range validator.Errors {
+			logger.Error().Str("field", key).Msg(errMsg)
+		}
+		return fmt.Errorf("invalid configuration")
+	}
+	
+	// Create API server
+	apiServer := api.NewApiServer(apiConfig, &logger, appModels)
+	
+	// Create HTTP server
+	httpServer := &http.Server{
+		Addr:         apiConfig.ListenAddr.Host,
+		Handler:      apiServer.routes(),
+		ReadTimeout:  apiConfig.ServerReadTimeout,
+		WriteTimeout: apiConfig.ServerWriteTimeout,
+		IdleTimeout:  apiConfig.ServerIdleTimeout,
+	}
+	
+	// Set up graceful shutdown
+	shutdownChan := make(chan error)
+	go api.gracefulShutdown(apiServer, &logger, shutdownChan, 
+		httpServer.Shutdown, 
+		worker.Shutdown, 
+		otelShut,
+		db.Close,
+		cache.Close,
+	)
+	
+	// Start HTTP server
+	logger.Info().Msgf("Starting server on %s", httpServer.Addr)
+	if apiConfig.ListenAddr.Scheme == "https" {
+		err = httpServer.ListenAndServeTLS(apiConfig.TlsCertFile, apiConfig.TlsKeyFile)
+	} else {
+		err = httpServer.ListenAndServe()
+	}
+	
+	if err != nil && err != http.ErrServerClosed {
+		logger.Error().Err(err).Msg("Server failed")
+		return err
+	}
+	
+	// Wait for shutdown to complete
+	if err := <-shutdownChan; err != nil {
+		logger.Error().Err(err).Msg("Shutdown failed")
+		return err
+	}
+	
+	logger.Info().Msg("Server shutdown complete")
+	return nil
+}
+
+func main() {
+	if err := startServer(); err != nil {
+		os.Exit(1)
+	}
 }
 #+END_SRC

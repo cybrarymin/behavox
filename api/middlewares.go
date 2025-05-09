@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	observ "github.com/cybrarymin/behavox/api/observability"
 	"github.com/felixge/httpsnoop"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -165,5 +167,62 @@ func (api *ApiServer) rateLimit(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+func (api *ApiServer) JWTAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, span := otel.Tracer("JwtAuth.Tracer").Start(r.Context(), "JwtAuth.Span")
+		defer span.End()
+		span.SetAttributes(attribute.String("http.target", r.RequestURI))
+		r = r.WithContext(ctx)
+
+		headerValue := r.Header.Get("Authorization")
+		if headerValue == "" {
+			err := errors.New("nil token received")
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed jwt authentication.")
+			api.invalidAuthenticationCredResponse(w, r)
+			return
+		}
+
+		headerValues := strings.Split(headerValue, " ")
+		if len(headerValues) != 2 && headerValues[0] != "Bearer" {
+			err := errors.New("invalid auth header format")
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed jwt authentication.")
+			api.invalidAuthenticationCredResponse(w, r)
+			return
+		}
+		jToken := headerValues[1]
+		// ParseWithClaims will fetch the token and keystring of the token
+		// It will verify the signature to make sure token is valid
+		// It will verify all the registered claims of jwt.Registered claims
+		verifiedToken, err := jwt.ParseWithClaims(jToken, &customClaims{}, func(t *jwt.Token) (interface{}, error) {
+			return []byte(CmdJwtKey), nil
+		})
+		if err != nil {
+			switch {
+			case errors.Is(err, jwt.ErrTokenSignatureInvalid):
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "failed jwt authentication")
+				api.invalidJWTTokenSignatureResponse(w, r)
+				return
+			default:
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "failed jwt authentication.")
+				api.invalidAuthenticationCredResponse(w, r)
+				return
+			}
+		}
+		if !verifiedToken.Valid {
+			err := errors.New("invalid jwt token")
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed jwt authentication.")
+			api.invalidAuthenticationCredResponse(w, r)
+			return
+		}
+
+		next.ServeHTTP(w, r)
 	}
 }

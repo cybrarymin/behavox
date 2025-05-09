@@ -14,8 +14,10 @@ func (api *ApiServer) logError(err error) {
 
 // errorResponse is the method we use to send a json formatted error to the client in case of any error
 func (api *ApiServer) errorResponse(w http.ResponseWriter, r *http.Request, status int, message interface{}) {
+
 	e := helpers.Envelope{
-		"error": message,
+		"error":      message,
+		"request_id": api.getReqIDContext(r),
 	}
 	err := helpers.WriteJson(r.Context(), w, status, e, nil)
 
@@ -80,14 +82,4 @@ func (api *ApiServer) authenticationRequiredResposne(w http.ResponseWriter, r *h
 	w.Header().Set("WWW-Authenticate", "Bearer Jwt")
 	message := "authentication required"
 	api.errorResponse(w, r, http.StatusUnauthorized, message)
-}
-
-func (api *ApiServer) unauthorizedAccessInactiveUserResponse(w http.ResponseWriter, r *http.Request) {
-	message := "user must be activated to access this resource"
-	api.errorResponse(w, r, http.StatusForbidden, message)
-}
-
-func (api *ApiServer) notPermittedResponse(w http.ResponseWriter, r *http.Request) {
-	message := "your user account doesn't have the necessary permissions to access this resource"
-	api.errorResponse(w, r, http.StatusForbidden, message)
 }

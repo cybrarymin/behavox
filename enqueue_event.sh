@@ -1,6 +1,7 @@
 #!/bin/bash
 
 API_URL="https://127.0.0.1:443/v1/events"
+source .envrc
 
 print_usage() {
     echo "Usage: $0 <event_type>  [additional arguments]"
@@ -38,6 +39,12 @@ case "$EVENT_TYPE" in
 esac
 
 
-curl -k -X POST "$API_URL" \
-    -H "Content-Type: application/json" \
-    -d "$JSON_PAYLOAD"
+TOKEN=$(curl -k -X POST -u "$ADMINUSER:$ADMINPASS" https://localhost:443/v1/tokens | jq .result.token | tr -d '"')
+
+
+if [ -z $TOKEN ] || [[ $TOKEN == *"error"* ]]; then
+    echo "Authentication failed. Could not obtain token."
+    exit 1
+fi
+
+curl -k -X POST -H "Authorization: Bearer $TOKEN" "$API_URL" -H "Content-Type: application/json" -d "$JSON_PAYLOAD" && curl -k -X POST -H "Authorization: Bearer $TOKEN" "$API_URL" -H "Content-Type: application/json" -d "$JSON_PAYLOAD"

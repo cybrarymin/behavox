@@ -200,11 +200,10 @@ Getting the goroutine id that running a task
 func GetGoroutineID(ctx context.Context) uint64 {
 	_, span := otel.Tracer("GetGoroutineID.Tracer").Start(ctx, "GetGoroutineID.Span")
 	defer span.End()
-
-	b := make([]byte, 64)
-	b = b[:runtime.Stack(b, false)] // putting all to false to only get the stack trace of that single goroutine instead of all goroutines
-	b = b[:bytes.IndexByte(b, ' ')]
-	n, _ := strconv.ParseUint(string(b), 10, 64)
+	stackTrace := make([]byte, 1024)
+	runtime.Stack(stackTrace, true)
+	goroutineID := strings.Split(string(stackTrace), " ")[1]
+	n, _ := strconv.ParseUint(goroutineID, 10, 64)
 	return n
 }
 

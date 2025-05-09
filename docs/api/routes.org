@@ -5,210 +5,965 @@
 
 :CONTENTS:
 - [[#concepts-and-purpose][Concepts and purpose]]
-  - [[#http-routing-system][HTTP routing system]]
+  - [[#request-routing][Request routing]]
+  - [[#http-method-handling][HTTP method handling]]
   - [[#middleware-integration][Middleware integration]]
+  - [[#error-handling][Error handling]]
 - [[#design-and-implementation][Design and implementation]]
   - [[#router-initialization][Router initialization]]
-  - [[#error-handling-routes][Error handling routes]]
-  - [[#application-routes][Application routes]]
+  - [[#error-handler-configuration][Error handler configuration]]
+  - [[#event-endpoints][Event endpoints]]
   - [[#metrics-endpoint][Metrics endpoint]]
-  - [[#middleware-chain][Middleware chain]]
+  - [[#middleware-chain-application][Middleware chain application]]
 - [[#usage-examples][Usage examples]]
-  - [[#server-initialization-with-routes][Server initialization with routes]]
-  - [[#extending-the-router][Extending the router]]
-  - [[#routing-with-path-parameters][Routing with path parameters]]
+  - [[#accessing-api-endpoints][Accessing API endpoints]]
+  - [[#extending-router-with-new-endpoints][Extending router with new endpoints]]
+  - [[#implementing-versioned-routes][Implementing versioned routes]]
+  - [[#creating-authenticated-routes][Creating authenticated routes]]
 :END:
 
 ** Concepts and purpose
 
-*** HTTP routing system
+*** Request routing
 
-- HTTP routing :: The API server implements a structured routing system that maps HTTP endpoints to their corresponding handlers. The routing system is responsible for:
-  - URL pattern matching :: Matching incoming request URLs to registered handler functions
-  - HTTP method handling :: Enforcing method-specific handlers (GET, POST, etc.)
-  - Error responses :: Providing consistent responses for not found routes and method not allowed errors
-  - Metrics collection :: Instrumenting all routes with Prometheus metrics for monitoring
-  The router acts as the entry point for all API requests and directs them to the appropriate business logic handlers.
+- API endpoint routing :: The routes.go file defines the API's HTTP routing system that:
+  - Maps URL paths to handlers :: Connects API endpoints to their handling functions
+  - Defines API structure :: Establishes the overall structure of the API
+  - Creates resource hierarchy :: Organizes endpoints in a logical hierarchy
+  - Enforces URL conventions :: Maintains consistent URL patterns
+  This routing system serves as the entry point for all client requests and directs them to appropriate handlers.
+
+*** HTTP method handling
+
+- Method-specific handling :: The routing system associates endpoints with specific HTTP methods:
+  - Method enforcement :: Ensures endpoints only respond to allowed methods
+  - REST convention adherence :: Maps HTTP methods to appropriate actions (GET, POST, etc.)
+  - Method not allowed detection :: Provides proper responses for unsupported methods
+  This approach ensures that endpoints follow RESTful conventions and reject inappropriate method usage.
 
 *** Middleware integration
 
-- Middleware chain :: The router implements a comprehensive middleware chain that applies cross-cutting concerns to all routes:
-  - Panic recovery :: Prevents server crashes by recovering from panics in handlers
-  - Rate limiting :: Controls request rates to prevent abuse
-  - Request context :: Adds request IDs for tracing and correlation
-  - OpenTelemetry :: Provides distributed tracing for all requests
-  - Prometheus metrics :: Collects performance metrics for all routes
-  This middleware chain ensures consistent behavior across all API endpoints while maintaining clean separation of concerns.
+- Route middleware application :: The router applies middleware to enhance request processing:
+  - Middleware chain integration :: Combines route definitions with middleware chains
+  - Per-route metrics :: Applies Prometheus instrumentation to each route
+  - Global middleware :: Applies server-wide middleware such as panic recovery
+  This integration ensures consistent application of cross-cutting concerns to all routes.
+
+*** Error handling
+
+- Error response management :: The router includes custom error handlers for common error scenarios:
+  - Not found handling :: Provides consistent responses for nonexistent routes
+  - Method not allowed handling :: Responds appropriately for invalid HTTP methods
+  - Error instrumentation :: Ensures errors are properly monitored and measured
+  This consistent error handling improves the API's usability and observability.
 
 ** Design and implementation
 
 *** Router initialization
 
-- Router setup :: The `routes` method initializes an HTTP router with all configured routes
-  - Uses the `httprouter` package for efficient URL pattern matching
-  - Returns a fully configured `http.Handler` ready for use with the server
+- Router setup :: The `routes` method initializes and configures the HTTP router
+  - Router creation :: Creates a new httprouter instance
+  - Handler registration :: Registers handlers for specific paths and methods
+  - Middleware application :: Applies middleware to the entire router
+  - Returns http.Handler :: Returns a fully configured handler for use with the HTTP server
   #+BEGIN_SRC go
 func (api *ApiServer) routes() http.Handler {
 	router := httprouter.New()
-	
-	// Configuration of routes...
-	
-	return api.panicRecovery(api.rateLimit(api.setContextHandler(api.otelHandler(router))))
+
+	// handle error responses for both notFoundResponses and InvalidMethods
+	router.NotFound = api.promHandler(http.HandlerFunc(api.notFoundResponse))
+	router.MethodNotAllowed = api.promHandler(api.methodNotAllowedResponse)
+
+	// handle the event
+	router.HandlerFunc(http.MethodPost, "/v1/events", api.promHandler(api.createEventHandler))
+	router.HandlerFunc(http.MethodGet, "/v1/stats", api.promHandler(api.GetEventStatsHandler))
+
+	// Prometheus Handler
+	router.Handler(http.MethodGet, "/metrics", promhttp.Handler())
+
+	// Otel http instrumentation
+	return api.panicRecovery(api.setContextHandler(api.otelHandler(api.rateLimit(router))))
 }
   #+END_SRC
 
-*** Error handling routes
+*** Error handler configuration
 
-- Error handler configuration :: Sets up custom handlers for common HTTP errors
-  - Not Found (404) responses for nonexistent routes
-  - Method Not Allowed (405) responses for incorrect HTTP methods
-  - Both error handlers are instrumented with Prometheus metrics
+- Error handlers :: Configures custom handlers for common HTTP errors
+  - Not found handler :: Responds to requests for nonexistent resources
+  - Method not allowed handler :: Responds to requests using unsupported HTTP methods
+  - Metrics instrumentation :: Ensures errors are properly measured
   #+BEGIN_SRC go
 // handle error responses for both notFoundResponses and InvalidMethods
-router.NotFound = api.promHandler(http.HandlerFunc(api.notFoundResponse), "")
-router.MethodNotAllowed = api.promHandler(api.methodNotAllowedResponse, "")
+router.NotFound = api.promHandler(http.HandlerFunc(api.notFoundResponse))
+router.MethodNotAllowed = api.promHandler(api.methodNotAllowedResponse)
   #+END_SRC
 
-*** Application routes
+*** Event endpoints
 
-- Event endpoints :: Registers handlers for event-related API operations
-  - POST `/v1/events` for creating new events
-  - GET `/v1/events/stats` for retrieving event statistics
-  - All routes are instrumented with path-specific Prometheus metrics
+- Event management endpoints :: Registers handlers for event-related operations
+  - Event creation :: POST endpoint for creating new events
+  - Queue statistics :: GET endpoint for retrieving event queue statistics
+  - Metrics instrumentation :: Applies Prometheus metrics collection to each endpoint
+  These endpoints form the core API functionality for event management.
   #+BEGIN_SRC go
 // handle the event
-router.HandlerFunc(http.MethodPost, "/v1/events", api.promHandler(api.createEventHandler, "/v1/events"))
-router.HandlerFunc(http.MethodGet, "/v1/events/stats", api.promHandler(api.GetEventStatsHandler, "/v1/events/stats"))
+router.HandlerFunc(http.MethodPost, "/v1/events", api.promHandler(api.createEventHandler))
+router.HandlerFunc(http.MethodGet, "/v1/stats", api.promHandler(api.GetEventStatsHandler))
   #+END_SRC
 
 *** Metrics endpoint
 
-- Prometheus metrics :: Exposes a dedicated endpoint for scraping Prometheus metrics
-  - Uses the standard Prometheus handler from the `promhttp` package
-  - Available at the `/metrics` path via HTTP GET
+- Prometheus metrics :: Configures an endpoint for Prometheus metrics scraping
+  - Standard metrics handler :: Uses the promhttp.Handler() for metrics exposure
+  - GET method restriction :: Ensures metrics are only accessible via GET
+  This endpoint enables monitoring and observability of the API server.
   #+BEGIN_SRC go
 // Prometheus Handler
 router.Handler(http.MethodGet, "/metrics", promhttp.Handler())
   #+END_SRC
 
-*** Middleware chain
+*** Middleware chain application
 
-- Middleware application :: Wraps the configured router with the middleware chain
-  - Applies middleware in a specific order to ensure correct processing
-  - Creates a unified handler that processes all middleware for each request
-  - Order: panic recovery → rate limiting → context handling → OpenTelemetry
+- Middleware chaining :: Applies middleware to the router in a specific order
+  - Panic recovery :: Outermost middleware to catch all panics
+  - Context setup :: Adds request ID to request context
+  - OpenTelemetry :: Adds distributed tracing capabilities
+  - Rate limiting :: Controls request rates to prevent overload
+  This ordering ensures proper middleware execution sequence for all requests.
   #+BEGIN_SRC go
-return api.panicRecovery(api.rateLimit(api.setContextHandler(api.otelHandler(router))))
+// Otel http instrumentation
+return api.panicRecovery(api.setContextHandler(api.otelHandler(api.rateLimit(router))))
   #+END_SRC
 
 ** Usage examples
 
-*** Server initialization with routes
+*** Accessing API endpoints
 
-Example of initializing the server with the configured routes:
+Example of accessing the API endpoints using curl:
+
+#+BEGIN_SRC bash
+# Create a new log event
+curl -X POST https://api.example.com/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event": {
+      "event_type": "log",
+      "event_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      "level": "error",
+      "message": "Application crashed"
+    }
+  }'
+
+# Get queue statistics
+curl -X GET https://api.example.com/v1/stats
+
+# Access Prometheus metrics
+curl -X GET https://api.example.com/metrics
+#+END_SRC
+
+Example of using API endpoints in Go:
 
 #+BEGIN_SRC go
 package main
 
 import (
-    "net/http"
-    "context"
-    "time"
-    
-    "github.com/cybrarymin/behavox/api"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"net/http"
 )
 
+// API client for event service
+type EventClient struct {
+	BaseURL    string
+	HTTPClient *http.Client
+}
+
+// NewEventClient creates a new API client
+func NewEventClient(baseURL string) *EventClient {
+	return &EventClient{
+		BaseURL:    baseURL,
+		HTTPClient: &http.Client{},
+	}
+}
+
+// CreateLogEvent sends a log event to the API
+func (c *EventClient) CreateLogEvent(eventID, level, message string) error {
+	// Create request body
+	reqBody := map[string]interface{}{
+		"event": map[string]interface{}{
+			"event_type": "log",
+			"event_id":   eventID,
+			"level":      level,
+			"message":    message,
+		},
+	}
+	
+	// Serialize to JSON
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("error creating request: %w", err)
+	}
+	
+	// Create request
+	req, err := http.NewRequest("POST", c.BaseURL+"/v1/events", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	
+	// Send request
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	// Check response
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
+	}
+	
+	return nil
+}
+
+// GetQueueStats retrieves event queue statistics
+func (c *EventClient) GetQueueStats() (int, error) {
+	// Create request
+	req, err := http.NewRequest("GET", c.BaseURL+"/v1/stats", nil)
+	if err != nil {
+		return 0, fmt.Errorf("error creating request: %w", err)
+	}
+	
+	// Send request
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	// Check response
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return 0, fmt.Errorf("API error (status %d): %s", resp.StatusCode, body)
+	}
+	
+	// Parse response
+	var result struct {
+		Result struct {
+			QueueSize int `json:"queue_size"`
+		} `json:"result"`
+	}
+	
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return 0, fmt.Errorf("error parsing response: %w", err)
+	}
+	
+	return result.Result.QueueSize, nil
+}
+
 func main() {
-    // Initialize API server
-    // ... server configuration as shown in previous examples ...
-    
-    // Get the configured router
-    router := apiServer.routes()
-    
-    // Create the HTTP server with the router
-    httpServer := &http.Server{
-        Addr:         cfg.ListenAddr.Host,
-        Handler:      router,
-        ReadTimeout:  cfg.ServerReadTimeout,
-        WriteTimeout: cfg.ServerWriteTimeout,
-        IdleTimeout:  cfg.ServerIdleTimeout,
-    }
-    
-    // Start the server
-    go func() {
-        apiServer.Logger.Info().Msg("Starting server")
-        if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            apiServer.Logger.Fatal().Err(err).Msg("Server failed")
-        }
-    }()
-    
-    // ... graceful shutdown code ...
+	// Create client
+	client := NewEventClient("https://api.example.com")
+	
+	// Create log event
+	err := client.CreateLogEvent(
+		"e4b302dc-0a50-4c1a-bea0-12ff3e58269f",
+		"info",
+		"Application started",
+	)
+	if err != nil {
+		fmt.Printf("Error creating event: %v\n", err)
+		return
+	}
+	fmt.Println("Event created successfully")
+	
+	// Get queue statistics
+	queueSize, err := client.GetQueueStats()
+	if err != nil {
+		fmt.Printf("Error getting queue stats: %v\n", err)
+		return
+	}
+	fmt.Printf("Current queue size: %d\n", queueSize)
 }
 #+END_SRC
 
-*** Extending the router
+*** Extending router with new endpoints
 
-Example of adding a new route to the existing router:
+Example of extending the router with additional endpoints:
 
 #+BEGIN_SRC go
-// Extend the routes method to add a health check endpoint
-func (api *ApiServer) routes() http.Handler {
-    router := httprouter.New()
-    
-    // Existing configuration...
-    router.NotFound = api.promHandler(http.HandlerFunc(api.notFoundResponse), "")
-    router.MethodNotAllowed = api.promHandler(api.methodNotAllowedResponse, "")
-    
-    // Add a health check endpoint
-    router.HandlerFunc(http.MethodGet, "/health", api.promHandler(api.healthCheckHandler, "/health"))
-    
-    // Event endpoints
-    router.HandlerFunc(http.MethodPost, "/v1/events", api.promHandler(api.createEventHandler, "/v1/events"))
-    router.HandlerFunc(http.MethodGet, "/v1/events/stats", api.promHandler(api.GetEventStatsHandler, "/v1/events/stats"))
-    
-    // Prometheus Handler
-    router.Handler(http.MethodGet, "/metrics", promhttp.Handler())
-    
-    return api.panicRecovery(api.rateLimit(api.setContextHandler(api.otelHandler(router))))
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"time"
+	
+	"github.com/cybrarymin/behavox/api"
+	"github.com/julienschmidt/httprouter"
+)
+
+// Extended API server with additional endpoints
+type ExtendedApiServer struct {
+	*api.ApiServer
+	version   string
+	startTime time.Time
 }
 
-// Health check handler implementation
-func (api *ApiServer) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte(`{"status":"healthy"}`))
+// NewExtendedApiServer creates an extended API server
+func NewExtendedApiServer(baseServer *api.ApiServer, version string) *ExtendedApiServer {
+	return &ExtendedApiServer{
+		ApiServer: baseServer,
+		version:   version,
+		startTime: time.Now(),
+	}
+}
+
+// Extended routes method that adds new endpoints to the base router
+func (ext *ExtendedApiServer) extendedRoutes() http.Handler {
+	// Create the base router from the parent class
+	baseRouter := ext.ApiServer.routes()
+	
+	// Create a new router to add our custom routes
+	router := httprouter.New()
+	
+	// Register new endpoints
+	
+	// Health check endpoint
+	router.HandlerFunc(http.MethodGet, "/health", ext.promHandler(ext.healthCheckHandler))
+	
+	// Status endpoint
+	router.HandlerFunc(http.MethodGet, "/status", ext.promHandler(ext.statusHandler))
+	
+	// Event search endpoint
+	router.HandlerFunc(http.MethodGet, "/v1/events/search", ext.promHandler(ext.searchEventsHandler))
+	
+	// Version endpoint
+	router.HandlerFunc(http.MethodGet, "/version", ext.promHandler(ext.versionHandler))
+	
+	// Handle error cases
+	router.NotFound = ext.promHandler(http.HandlerFunc(ext.notFoundResponse))
+	router.MethodNotAllowed = ext.promHandler(ext.methodNotAllowedResponse)
+	
+	// Apply middleware chain
+	return ext.panicRecovery(ext.setContextHandler(ext.otelHandler(ext.rateLimit(router))))
+}
+
+// Health check handler provides basic server health information
+func (ext *ExtendedApiServer) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	response := map[string]interface{}{
+		"status":  "healthy",
+		"uptime":  time.Since(ext.startTime).String(),
+		"version": ext.version,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+func (auth *AuthenticatedApiServer) searchEventsHandler(w http.ResponseWriter, r *http.Request) {
+	// Get user from context for audit logs
+	userVal := r.Context().Value(userContextKey)
+	user, _ := userVal.(User)
+	
+	// Get search parameters
+	query := r.URL.Query().Get("q")
+	eventType := r.URL.Query().Get("type")
+	limit := r.URL.Query().Get("limit")
+	
+	// Log search request
+	auth.Logger.Info().
+		Str("user", user.Username).
+		Str("query", query).
+		Str("event_type", eventType).
+		Str("limit", limit).
+		Msg("Event search request")
+	
+	// Return mock response for example
+	events := []map[string]interface{}{
+		{
+			"event_id":   "e4b302dc-0a50-4c1a-bea0-12ff3e58269f",
+			"event_type": "log",
+			"level":      "error",
+			"message":    "Application crashed",
+			"timestamp":  time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+		{
+			"event_id":   "a1b2c3d4-e5f6-4321-8765-9abcdef01234",
+			"event_type": "metric",
+			"value":      98.6,
+			"timestamp":  time.Now().Add(-time.Minute * 30).Format(time.RFC3339),
+		},
+	}
+	
+	response := map[string]interface{}{
+		"query":  query,
+		"type":   eventType,
+		"limit":  limit,
+		"events": events,
+		"count":  len(events),
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Main function showing usage
+func main() {
+	// Initialize components
+	// ...
+	
+	// Create base API server
+	baseServer := api.NewApiServer(config, logger, models)
+	
+	// Create authenticated API server
+	authServer := NewAuthenticatedApiServer(baseServer, "your-jwt-secret")
+	
+	// Create HTTP server with authenticated routes
+	httpServer := &http.Server{
+		Addr:         config.ListenAddr.Host,
+		Handler:      authServer.AuthenticatedRoutes(),
+		ReadTimeout:  config.ReadTimeout,
+		WriteTimeout: config.WriteTimeout,
+		IdleTimeout:  config.IdleTimeout,
+	}
+	
+	// Start server
+	httpServer.ListenAndServe()
+}
+#+END_SRCSet("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// Status handler provides more detailed status information
+func (ext *ExtendedApiServer) statusHandler(w http.ResponseWriter, r *http.Request) {
+	// Get queue size
+	queueSize := ext.models.EventQueue.Size(r.Context())
+	
+	// Create status response
+	response := map[string]interface{}{
+		"status":     "operational",
+		"uptime":     time.Since(ext.startTime).String(),
+		"version":    ext.version,
+		"queue_size": queueSize,
+		"rate_limit": map[string]interface{}{
+			"enabled":        ext.Cfg.RateLimit.Enabled,
+			"global_limit":   ext.Cfg.RateLimit.GlobalRateLimit,
+			"client_limit":   ext.Cfg.RateLimit.perClientRateLimit,
+		},
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Search events handler (placeholder)
+func (ext *ExtendedApiServer) searchEventsHandler(w http.ResponseWriter, r *http.Request) {
+	// Extract search parameters
+	query := r.URL.Query().Get("q")
+	eventType := r.URL.Query().Get("type")
+	
+	// Build response
+	response := map[string]interface{}{
+		"message": "Search functionality not yet implemented",
+		"params": map[string]string{
+			"query": query,
+			"type":  eventType,
+		},
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Version handler provides version information
+func (ext *ExtendedApiServer) versionHandler(w http.ResponseWriter, r *http.Request) {
+	response := map[string]string{
+		"version": ext.version,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Example of using the extended server
+func main() {
+	// Initialize base server components
+	// ...
+	
+	// Create base API server
+	baseServer := api.NewApiServer(config, logger, models)
+	
+	// Create extended API server
+	extendedServer := NewExtendedApiServer(baseServer, "1.2.3")
+	
+	// Create HTTP server with extended routes
+	httpServer := &http.Server{
+		Addr:         config.ListenAddr.Host,
+		Handler:      extendedServer.extendedRoutes(),
+		ReadTimeout:  config.ReadTimeout,
+		WriteTimeout: config.WriteTimeout,
+		IdleTimeout:  config.IdleTimeout,
+	}
+	
+	// Start the server
+	// ...
 }
 #+END_SRC
 
-*** Routing with path parameters
+*** Implementing versioned routes
 
-Example of adding a route with URL parameters:
+Example of implementing API versioning:
 
 #+BEGIN_SRC go
-// Extend the routes method to include a route with path parameters
-func (api *ApiServer) routes() http.Handler {
-    router := httprouter.New()
-    
-    // Existing configuration...
-    
-    // Add a route with a path parameter for getting a specific event by ID
-    router.GET("/v1/events/:id", func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-        // Extract the ID from the URL
-        id := ps.ByName("id")
-        
-        // Use the ID parameter to look up the event
-        // ...
-        
-        // Example response
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(http.StatusOK)
-        w.Write([]byte(`{"id":"` + id + `","name":"Example Event"}`))
-    })
-    
-    // Wrap the parameterized route with middleware
-    // The handler is now directly assigned using router.GET instead of HandlerFunc
-    // to take advantage of httprouter's path parameters
-    
-    return api.panicRecovery(api.rateLimit(api.setContextHandler(api.otelHandler(router))))
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"strings"
+	
+	"github.com/julienschmidt/httprouter"
+)
+
+// VersionedRouter handles API versioning for routes
+type VersionedRouter struct {
+	// Map of version to router
+	routers      map[string]*httprouter.Router
+	defaultRouter *httprouter.Router
+	
+	// Custom handlers
+	notFoundHandler      http.Handler
+	methodNotAllowedHandler http.Handler
+}
+
+// NewVersionedRouter creates a new versioned router
+func NewVersionedRouter() *VersionedRouter {
+	return &VersionedRouter{
+		routers: make(map[string]*httprouter.Router),
+	}
+}
+
+// Router gets or creates a router for the specified version
+func (vr *VersionedRouter) Router(version string) *httprouter.Router {
+	if router, exists := vr.routers[version]; exists {
+		return router
+	}
+	
+	router := httprouter.New()
+	vr.routers[version] = router
+	
+	// If this is the first router, make it the default
+	if vr.defaultRouter == nil {
+		vr.defaultRouter = router
+	}
+	
+	return router
+}
+
+// SetDefault sets the default router for unversioned requests
+func (vr *VersionedRouter) SetDefault(version string) error {
+	router, exists := vr.routers[version]
+	if !exists {
+		return fmt.Errorf("router for version %s does not exist", version)
+	}
+	
+	vr.defaultRouter = router
+	return nil
+}
+
+// SetNotFoundHandler sets the not found handler for all routers
+func (vr *VersionedRouter) SetNotFoundHandler(handler http.Handler) {
+	vr.notFoundHandler = handler
+	for _, router := range vr.routers {
+		router.NotFound = handler
+	}
+}
+
+// SetMethodNotAllowedHandler sets the method not allowed handler for all routers
+func (vr *VersionedRouter) SetMethodNotAllowedHandler(handler http.Handler) {
+	vr.methodNotAllowedHandler = handler
+	for _, router := range vr.routers {
+		router.MethodNotAllowed = handler
+	}
+}
+
+// ServeHTTP implements the http.Handler interface
+func (vr *VersionedRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Extract version from Accept header or URL
+	version := vr.extractVersion(r)
+	
+	// Get router for version
+	router, exists := vr.routers[version]
+	if !exists {
+		// Use default router if available, otherwise 404
+		if vr.defaultRouter != nil {
+			vr.defaultRouter.ServeHTTP(w, r)
+			return
+		}
+		
+		// No default router
+		if vr.notFoundHandler != nil {
+			vr.notFoundHandler.ServeHTTP(w, r)
+			return
+		}
+		
+		// Last resort
+		http.NotFound(w, r)
+		return
+	}
+	
+	// Use version-specific router
+	router.ServeHTTP(w, r)
+}
+
+// extractVersion gets the API version from the request
+func (vr *VersionedRouter) extractVersion(r *http.Request) string {
+	// Check URL path (e.g., /v1/events)
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) > 0 && strings.HasPrefix(parts[0], "v") {
+		return parts[0]
+	}
+	
+	// Check Accept header (e.g., application/vnd.api+json;version=v2)
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "version=") {
+		parts := strings.Split(accept, "version=")
+		if len(parts) > 1 {
+			version := strings.Split(parts[1], ";")[0]
+			version = strings.TrimSpace(version)
+			return version
+		}
+	}
+	
+	// Check version query parameter
+	version := r.URL.Query().Get("version")
+	if version != "" {
+		return version
+	}
+	
+	// Default to latest version
+	return "v1"
+}
+
+// Usage example
+func main() {
+	// Create versioned router
+	vRouter := NewVersionedRouter()
+	
+	// Get routers for different versions
+	v1Router := vRouter.Router("v1")
+	v2Router := vRouter.Router("v2")
+	
+	// Set v1 as default
+	vRouter.SetDefault("v1")
+	
+	// Configure routes for v1
+	v1Router.HandlerFunc(http.MethodPost, "/events", createEventHandlerV1)
+	v1Router.HandlerFunc(http.MethodGet, "/stats", getStatsHandlerV1)
+	
+	// Configure routes for v2
+	v2Router.HandlerFunc(http.MethodPost, "/events", createEventHandlerV2)
+	v2Router.HandlerFunc(http.MethodGet, "/stats", getStatsHandlerV2)
+	v2Router.HandlerFunc(http.MethodGet, "/events/search", searchEventsHandlerV2)
+	
+	// Set error handlers
+	vRouter.SetNotFoundHandler(http.HandlerFunc(notFoundHandler))
+	vRouter.SetMethodNotAllowedHandler(http.HandlerFunc(methodNotAllowedHandler))
+	
+	// Create HTTP server
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: vRouter,
+	}
+	
+	// Start server
+	server.ListenAndServe()
 }
 #+END_SRC
+
+*** Creating authenticated routes
+
+Example of extending the router with authenticated endpoints:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+	
+	"github.com/cybrarymin/behavox/api"
+	"github.com/golang-jwt/jwt/v4"
+	"github.com/julienschmidt/httprouter"
+)
+
+// User represents an authenticated user
+type User struct {
+	ID       string
+	Username string
+	Roles    []string
+}
+
+// Context key for user information
+type contextKey string
+const userContextKey = contextKey("user")
+
+// AuthenticatedApiServer extends the base API server with authentication
+type AuthenticatedApiServer struct {
+	*api.ApiServer
+	jwtSecret     []byte
+	userStore     map[string]User
+}
+
+// NewAuthenticatedApiServer creates a new authenticated API server
+func NewAuthenticatedApiServer(baseServer *api.ApiServer, jwtSecret string) *AuthenticatedApiServer {
+	return &AuthenticatedApiServer{
+		ApiServer:  baseServer,
+		jwtSecret:  []byte(jwtSecret),
+		userStore:  make(map[string]User),
+	}
+}
+
+// AuthenticatedRoutes creates a router with authenticated endpoints
+func (auth *AuthenticatedApiServer) AuthenticatedRoutes() http.Handler {
+	// Create base router
+	router := httprouter.New()
+	
+	// Public endpoints (no authentication required)
+	router.HandlerFunc(http.MethodPost, "/auth/login", auth.promHandler(auth.loginHandler))
+	router.HandlerFunc(http.MethodGet, "/v1/stats", auth.promHandler(auth.GetEventStatsHandler))
+	
+	// Protected endpoints (authentication required)
+	router.HandlerFunc(http.MethodPost, "/v1/events", auth.promHandler(auth.authenticateMiddleware(auth.createEventHandler)))
+	router.HandlerFunc(http.MethodGet, "/v1/events/search", auth.promHandler(auth.authenticateMiddleware(auth.searchEventsHandler)))
+	router.HandlerFunc(http.MethodGet, "/v1/users/me", auth.promHandler(auth.authenticateMiddleware(auth.getCurrentUserHandler)))
+	
+	// Admin endpoints (authentication + admin role required)
+	router.HandlerFunc(http.MethodGet, "/admin/users", auth.promHandler(auth.authenticateMiddleware(auth.requireRoleMiddleware("admin", auth.listUsersHandler))))
+	
+	// Error handlers
+	router.NotFound = auth.promHandler(http.HandlerFunc(auth.notFoundResponse))
+	router.MethodNotAllowed = auth.promHandler(auth.methodNotAllowedResponse)
+	
+	// Apply middleware chain
+	return auth.panicRecovery(auth.setContextHandler(auth.otelHandler(auth.rateLimit(router))))
+}
+
+// Login handler authenticates users and issues JWT tokens
+func (auth *AuthenticatedApiServer) loginHandler(w http.ResponseWriter, r *http.Request) {
+	// Parse login request
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		auth.badRequestResponse(w, r, err)
+		return
+	}
+	
+	// Authenticate user (simplified for example)
+	if req.Username != "admin" || req.Password != "password" {
+		auth.invalidAuthenticationCredResponse(w, r)
+		return
+	}
+	
+	// Create user if not exists
+	if _, exists := auth.userStore[req.Username]; !exists {
+		auth.userStore[req.Username] = User{
+			ID:       "user-1",
+			Username: req.Username,
+			Roles:    []string{"admin"},
+		}
+	}
+	
+	// Create JWT token
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":  auth.userStore[req.Username].ID,
+		"user": req.Username,
+		"roles": []string{"admin"},
+		"exp":  time.Now().Add(time.Hour * 24).Unix(),
+	})
+	
+	// Sign token
+	tokenString, err := token.SignedString(auth.jwtSecret)
+	if err != nil {
+		auth.serverErrorResponse(w, r, err)
+		return
+	}
+	
+	// Return token
+	response := map[string]string{
+		"token":   tokenString,
+		"message": "Login successful",
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Authentication middleware verifies JWT tokens
+func (auth *AuthenticatedApiServer) authenticateMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Extract token from Authorization header
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			auth.authenticationRequiredResposne(w, r)
+			return
+		}
+		
+		// Check for Bearer prefix
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			auth.invalidAuthenticationCredResponse(w, r)
+			return
+		}
+		
+		// Parse and validate token
+		tokenString := parts[1]
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			// Validate signing method
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, errors.New("invalid signing method")
+			}
+			return auth.jwtSecret, nil
+		})
+		
+		if err != nil {
+			auth.invalidJWTTokenSignatureResponse(w, r)
+			return
+		}
+		
+		if !token.Valid {
+			auth.invalidAuthenticationCredResponse(w, r)
+			return
+		}
+		
+		// Extract claims
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			auth.invalidAuthenticationCredResponse(w, r)
+			return
+		}
+		
+		// Get user information
+		username, ok := claims["user"].(string)
+		if !ok {
+			auth.invalidAuthenticationCredResponse(w, r)
+			return
+		}
+		
+		// Get roles
+		var roles []string
+		if rolesVal, ok := claims["roles"].([]interface{}); ok {
+			for _, role := range rolesVal {
+				if roleStr, ok := role.(string); ok {
+					roles = append(roles, roleStr)
+				}
+			}
+		}
+		
+		// Create user object
+		user := User{
+			ID:       claims["sub"].(string),
+			Username: username,
+			Roles:    roles,
+		}
+		
+		// Add user to context
+		ctx := context.WithValue(r.Context(), userContextKey, user)
+		r = r.WithContext(ctx)
+		
+		// Call next handler
+		next(w, r)
+	}
+}
+
+// Role-based authorization middleware
+func (auth *AuthenticatedApiServer) requireRoleMiddleware(role string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get user from context
+		userVal := r.Context().Value(userContextKey)
+		if userVal == nil {
+			auth.authenticationRequiredResposne(w, r)
+			return
+		}
+		
+		user, ok := userVal.(User)
+		if !ok {
+			auth.serverErrorResponse(w, r, errors.New("invalid user context"))
+			return
+		}
+		
+		// Check if user has required role
+		hasRole := false
+		for _, userRole := range user.Roles {
+			if userRole == role {
+				hasRole = true
+				break
+			}
+		}
+		
+		if !hasRole {
+			auth.notPermittedResponse(w, r)
+			return
+		}
+		
+		// Call next handler
+		next(w, r)
+	}
+}
+
+// Example handlers for authenticated routes
+
+func (auth *AuthenticatedApiServer) getCurrentUserHandler(w http.ResponseWriter, r *http.Request) {
+	userVal := r.Context().Value(userContextKey)
+	user, ok := userVal.(User)
+	if !ok {
+		auth.serverErrorResponse(w, r, errors.New("invalid user context"))
+		return
+	}
+	
+	response := map[string]interface{}{
+		"id":       user.ID,
+		"username": user.Username,
+		"roles":    user.Roles,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+func (auth *AuthenticatedApiServer) listUsersHandler(w http.ResponseWriter, r *http.Request) {
+	users := make([]map[string]interface{}, 0, len(auth.userStore))
+	for _, user := range auth.userStore {
+		users = append(users, map[string]interface{}{
+			"id":       user.ID,
+			"username": user.Username,
+			"roles":    user.Roles,
+		})
+	}
+	
+	response := map[string]interface{}{
+		"users": users,
+		"count": len(users),
+	}
+	
+	w.Header().

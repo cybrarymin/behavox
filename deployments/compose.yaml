@@ -34,7 +34,6 @@ services:
       prometheus:
         condition: service_started
   
-  
   # bring up Jaeger for distributed tracing with OpenTelemetry
   jaeger:
     container_name: jaeger
@@ -73,5 +72,28 @@ services:
     volumes:
       - ./grafana:/etc/grafana/provisioning/datasources
 
+  rabbitmq:
+    image: rabbitmq:latest
+    container_name: rabbitmq
+    restart: always
+    ports:
+      - 5672:5672
+      - 15672:15672 # management console of rabbitMq
+    environment:
+      RABBITMQ_DEFAULT_USER: behavox
+      RABBITMQ_DEFAULT_PASS: behavox
+    configs:
+      - source: rabbitmq-plugins
+        target: /etc/rabbitmq/enabled_plugins
+    volumes:
+      - rabbitmq-lib:/var/lib/rabbitmq/
+      - rabbitmq-log:/var/log/rabbitmq
+
+configs:
+  rabbitmq-plugins:
+    content: "[rabbitmq_management]."
+
 volumes:
   prom_data:
+  rabbitmq-lib:
+  rabbitmq-log:

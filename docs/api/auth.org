@@ -1,0 +1,540 @@
+* API Authentication
+:PROPERTIES:
+:TOC: :include descendants
+:END:
+
+:CONTENTS:
+- [[#concepts-and-purpose][Concepts and purpose]]
+  - [[#jwt-authentication][JWT authentication]]
+  - [[#basic-authentication][Basic authentication]]
+  - [[#custom-claims][Custom claims]]
+- [[#design-and-implementation][Design and implementation]]
+  - [[#jwt-configuration][JWT configuration]]
+  - [[#custom-claims-structure][Custom claims structure]]
+  - [[#jwt-token-creation][JWT token creation]]
+  - [[#basic-authentication-implementation][Basic authentication implementation]]
+- [[#usage-examples][Usage examples]]
+  - [[#obtaining-a-jwt-token][Obtaining a JWT token]]
+  - [[#validating-jwt-tokens][Validating JWT tokens]]
+  - [[#securing-api-endpoints][Securing API endpoints]]
+  - [[#complete-authentication-flow][Complete authentication flow]]
+:END:
+
+** Concepts and purpose
+
+*** JWT authentication
+
+- JWT authentication :: The API server implements JSON Web Token (JWT) based authentication which provides:
+  - Stateless authentication :: No need to store session data on the server
+  - Signature verification :: Tokens are signed to prevent tampering
+  - Claim-based identity :: Token contains claims about the user's identity
+  - Expiration control :: Tokens have configurable expiration times
+  - Audience restrictions :: Tokens can be limited to specific services
+  This implementation enables secure API access without requiring session state to be maintained on the server.
+
+*** Basic authentication
+
+- Basic authentication :: The API provides a mechanism to authenticate using HTTP Basic Authentication:
+  - Username/password validation :: Verifies provided credentials against configured values
+  - Token issuance :: Upon successful authentication, issues a JWT token
+  - Security validation :: Enforces security requirements for credentials
+  - Error reporting :: Provides clear error messages for invalid authentication attempts
+  Basic authentication is primarily used as a mechanism to obtain JWT tokens and is not recommended for direct API access.
+
+*** Custom claims
+
+- Custom claims :: The API extends standard JWT claims with application-specific information:
+  - Email claim :: Adds user's email address to the token
+  - Standard claims :: Includes all standard JWT registered claims
+  - Validation :: Custom claims are validated during token parsing
+  - Token identification :: Each token has a unique UUID
+  These custom claims enable application-specific authorization and user identification while maintaining compatibility with JWT standards.
+
+** Design and implementation
+
+*** JWT configuration
+
+- JWT configuration :: The authentication system is configured through environment variables
+  | ~CmdJwtKey~       | Signing key used to sign and verify JWT tokens |
+  | ~CmdApiAdmin~     | Username for the API administrator account |
+  | ~CmdApiAdminPass~ | Password for the API administrator account |
+  #+BEGIN_SRC go
+var (
+	CmdJwtKey       string
+	CmdApiAdmin     string
+	CmdApiAdminPass string
+)
+  #+END_SRC
+
+*** Custom claims structure
+
+- Custom claims structure :: The `customClaims` struct extends the standard JWT claims
+  | ~Email string~            | User's email address |
+  | ~jwt.RegisteredClaims~    | Standard JWT claims (embedded) |
+  #+BEGIN_SRC go
+type customClaims struct {
+	Email string `json:"email"`
+	jwt.RegisteredClaims
+}
+  #+END_SRC
+
+- Claims validation :: The `Validate` method implements the `jwt.ClaimsValidator` interface to validate custom claims
+  #+BEGIN_SRC go
+func (c *customClaims) Validate() error {
+	if ok := helpers.EmailRX.MatchString(c.Email); !ok {
+		return errors.New("invalid email claim on jwt token")
+	}
+	return nil
+}
+  #+END_SRC
+
+*** JWT token creation
+
+- Token creation handler :: The `createJWTTokenHandler` method authenticates users and issues JWT tokens
+  #+BEGIN_SRC go
+func (api *ApiServer) createJWTTokenHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("createJWTToken.handler.tracer").Start(r.Context(), "createJWTToken.handler.span")
+	defer span.End()
+
+	// Authenticate using Basic Auth
+	ok, nUser := api.BasicAuth(w, r)
+	if !ok {
+		return
+	}
+
+	// Create claims for the JWT token
+	claims := customClaims{
+		Email: nUser + "@behavox.com",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "behavox.example.com",
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * 24 * 3)), // 3 days expiration
+			Subject:   nUser,
+			Audience:  []string{"behavox.example.com"},
+			NotBefore: jwt.NewNumericDate(time.Now()),
+			ID:        uuid.New().String(),
+		},
+	}
+
+	// Add tracing information
+	span.SetAttributes(attribute.String("claims.user", claims.Email))
+	span.SetAttributes(attribute.String("claims.issuer", claims.Issuer))
+	span.SetAttributes(attribute.String("claims.subject", claims.Subject))
+	span.SetAttributes(attribute.StringSlice("claims.audience", claims.Audience))
+	span.SetAttributes(attribute.String("claims.id", claims.ID))
+
+	// Create and sign the token
+	jToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims, func(t *jwt.Token) {})
+	signedToken, err := jToken.SignedString([]byte(CmdJwtKey))
+	if err != nil {
+		api.serverErrorResponse(w, r, err)
+		return
+	}
+
+	// Return the token to the client
+	err = helpers.WriteJson(ctx, w, http.StatusOK, helpers.Envelope{"result": map[string]string{"token": signedToken}}, nil)
+	if err != nil {
+		api.serverErrorResponse(w, r, err)
+		return
+	}
+}
+  #+END_SRC
+
+*** Basic authentication implementation
+
+- Basic authentication :: The `BasicAuth` method validates HTTP Basic Authentication credentials
+  #+BEGIN_SRC go
+func (api *ApiServer) BasicAuth(w http.ResponseWriter, r *http.Request) (bool, string) {
+	_, span := otel.Tracer("basicAuth.handler.Tracer").Start(r.Context(), "basicAuth.handler.Span")
+	defer span.End()
+
+	// Extract Basic Auth credentials
+	user, pass, ok := r.BasicAuth()
+	if !ok {
+		span.SetStatus(codes.Error, "failed authentication")
+		api.authenticationRequiredResposne(w, r)
+		return false, ""
+	}
+
+	// Validate credential format
+	nVal := helpers.NewValidator()
+	nVal.Check(user != "", "name", "must be provided")
+	nVal.Check(len(user) <= 500, "name", "must not be more than 500 bytes long")
+	nVal.Check(pass != "", "password", "must be provided")
+	nVal.Check(len(pass) >= 8, "password", "must be at least 8 bytes long")
+	nVal.Check(len(pass) <= 72, "password", "must not be more than 72 bytes long")
+
+	if !nVal.Valid() {
+		for k, v := range nVal.Errors {
+			span.RecordError(fmt.Errorf("%s : %s", k, v))
+		}
+		span.SetStatus(codes.Error, "failed authentication")
+		api.invalidAuthenticationCredResponse(w, r)
+		return false, ""
+	}
+
+	// Verify credentials against configured values
+	if user != CmdApiAdmin || pass != CmdApiAdminPass {
+		span.SetStatus(codes.Error, "failed authentication due to invalid username or password")
+		api.invalidAuthenticationCredResponse(w, r)
+		return false, ""
+	}
+
+	return true, user
+}
+  #+END_SRC
+
+** Usage examples
+
+*** Obtaining a JWT token
+
+Example of obtaining a JWT token using Basic Authentication:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+)
+
+func obtainJWTToken(username, password string) (string, error) {
+	// Create the request
+	req, err := http.NewRequest("POST", "http://localhost:8080/v1/tokens", nil)
+	if err != nil {
+		return "", err
+	}
+	
+	// Add Basic Authentication header
+	auth := username + ":" + password
+	encodedAuth := base64.StdEncoding.EncodeToString([]byte(auth))
+	req.Header.Add("Authorization", "Basic "+encodedAuth)
+	
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("authentication failed with status: %d", resp.StatusCode)
+	}
+	
+	// Read and parse the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	
+	// Parse the JSON response
+	var response struct {
+		Result struct {
+			Token string `json:"token"`
+		} `json:"result"`
+	}
+	
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return "", err
+	}
+	
+	return response.Result.Token, nil
+}
+
+func main() {
+	// Obtain a JWT token
+	token, err := obtainJWTToken("admin", "password123")
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+	
+	fmt.Println("JWT Token:", token)
+	
+	// Now use this token for subsequent API calls
+}
+#+END_SRC
+
+*** Validating JWT tokens
+
+Example of validating a JWT token in a custom middleware:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	
+	"github.com/golang-jwt/jwt/v5"
+)
+
+// Custom claims structure matching the API's structure
+type customClaims struct {
+	Email string `json:"email"`
+	jwt.RegisteredClaims
+}
+
+// JWT verification middleware
+func jwtMiddleware(next http.Handler, jwtKey string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Get the Authorization header
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			http.Error(w, "Authorization header required", http.StatusUnauthorized)
+			return
+		}
+		
+		// Parse the Bearer token
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			http.Error(w, "Invalid authorization format", http.StatusUnauthorized)
+			return
+		}
+		tokenString := parts[1]
+		
+		// Parse and validate the token
+		token, err := jwt.ParseWithClaims(tokenString, &customClaims{}, func(token *jwt.Token) (interface{}, error) {
+			// Validate the signing method
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			
+			return []byte(jwtKey), nil
+		})
+		
+		if err != nil {
+			http.Error(w, "Invalid token: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		
+		// Verify token is valid
+		if !token.Valid {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+		
+		// Get the claims
+		claims, ok := token.Claims.(*customClaims)
+		if !ok {
+			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+			return
+		}
+		
+		// You can now use claims.Email, claims.Subject etc.
+		// Optionally, add claims to the request context for handlers to use
+		ctx := r.Context()
+		ctx = context.WithValue(ctx, "user_email", claims.Email)
+		ctx = context.WithValue(ctx, "user_id", claims.Subject)
+		
+		// Call the next handler with the updated context
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+#+END_SRC
+
+*** Securing API endpoints
+
+Example of securing API endpoints with the JWT authentication middleware:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	
+	"github.com/cybrarymin/behavox/api"
+)
+
+func setupSecuredRoutes(apiServer *api.ApiServer) {
+	// Public route for obtaining tokens
+	http.HandleFunc("/v1/tokens", apiServer.createJWTTokenHandler)
+	
+	// Protected routes using JWT authentication
+	protectedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This handler is protected by the JWT middleware
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "success",
+			"message": "You've accessed a protected endpoint",
+		})
+	})
+	
+	// Apply the JWT auth middleware
+	http.Handle("/v1/events", apiServer.JWTAuth(protectedHandler))
+	
+	// Additional protected endpoints
+	http.Handle("/v1/stats", apiServer.JWTAuth(apiServer.GetEventStatsHandler))
+}
+
+func main() {
+	// Initialize API server and other components
+	// ...
+	
+	// Setup routes
+	setupSecuredRoutes(apiServer)
+	
+	// Start the server
+	http.ListenAndServe(":8080", nil)
+}
+#+END_SRC
+
+*** Complete authentication flow
+
+Example of a complete authentication flow with token acquisition and protected API calls:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+)
+
+// Function to obtain a JWT token
+func getToken(username, password string) (string, error) {
+	// Create the request
+	req, err := http.NewRequest("POST", "http://localhost:8080/v1/tokens", nil)
+	if err != nil {
+		return "", err
+	}
+	
+	// Add Basic Authentication header
+	auth := username + ":" + password
+	encodedAuth := base64.StdEncoding.EncodeToString([]byte(auth))
+	req.Header.Add("Authorization", "Basic "+encodedAuth)
+	
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("authentication failed with status: %d", resp.StatusCode)
+	}
+	
+	// Read and parse the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	
+	// Parse the JSON response
+	var response struct {
+		Result struct {
+			Token string `json:"token"`
+		} `json:"result"`
+	}
+	
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return "", err
+	}
+	
+	return response.Result.Token, nil
+}
+
+// Function to call a protected API with the JWT token
+func callProtectedAPI(token, endpoint string, payload interface{}) error {
+	// Marshal the payload to JSON
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	
+	// Create the request
+	req, err := http.NewRequest("POST", "http://localhost:8080"+endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+	
+	// Add headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API call failed with status: %d, response: %s", resp.StatusCode, string(body))
+	}
+	
+	fmt.Printf("Successfully called %s\n", endpoint)
+	return nil
+}
+
+func main() {
+	// Authentication details
+	username := "admin"
+	password := "password123"
+	
+	// Get a JWT token
+	fmt.Println("Obtaining JWT token...")
+	token, err := getToken(username, password)
+	if err != nil {
+		fmt.Println("Error obtaining token:", err)
+		return
+	}
+	fmt.Println("Token obtained successfully")
+	
+	// Create a log event using the token
+	logEvent := map[string]interface{}{
+		"event": map[string]interface{}{
+			"event_type": "log",
+			"event_id":   "550e8400-e29b-41d4-a716-446655440000",
+			"level":      "info",
+			"message":    "Test log message",
+		},
+	}
+	
+	// Call the protected API
+	fmt.Println("Calling protected API...")
+	err = callProtectedAPI(token, "/v1/events", logEvent)
+	if err != nil {
+		fmt.Println("Error calling API:", err)
+		return
+	}
+	
+	// Get event stats
+	fmt.Println("Getting event stats...")
+	req, _ := http.NewRequest("GET", "http://localhost:8080/v1/stats", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Error getting stats:", err)
+		return
+	}
+	defer resp.Body.Close()
+	
+	// Read and display the response
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Println("Event stats response:", string(body))
+	
+	fmt.Println("Authentication flow completed successfully")
+}
+#+END_SRC 

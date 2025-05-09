@@ -7,17 +7,19 @@
 - [[#concepts-and-purpose][Concepts and purpose]]
   - [[#api-server-configuration][API server configuration]]
   - [[#request-context-management][Request context management]]
-  - [[#event-handling-integration][Event handling integration]]
+  - [[#middleware-integration][Middleware integration]]
+  - [[#event-handling][Event handling]]
 - [[#design-and-implementation][Design and implementation]]
   - [[#api-server-configuration-structure][API server configuration structure]]
   - [[#api-server-structure][API server structure]]
   - [[#configuration-validation][Configuration validation]]
   - [[#request-context-handling][Request context handling]]
-  - [[#models-integration][Models integration]]
+  - [[#middleware-implementation][Middleware implementation]]
+  - [[#event-handling-implementation][Event handling implementation]]
 - [[#usage-examples][Usage examples]]
   - [[#creating-and-configuring-the-api-server][Creating and configuring the API server]]
-  - [[#handling-request-context][Handling request context]]
-  - [[#working-with-events][Working with events]]
+  - [[#handling-events][Handling events]]
+  - [[#middleware-usage][Middleware usage]]
   - [[#complete-server-initialization][Complete server initialization]]
 :END:
 
@@ -40,14 +42,24 @@
   - Observability :: Enhanced monitoring and troubleshooting capabilities
   The request ID is a UUID generated for each incoming request and made available to all handlers and middleware in the request processing chain.
 
-*** Event handling integration
+*** Middleware integration
+
+- Middleware pipeline :: The API server implements a middleware pipeline that provides:
+  - Panic recovery :: Prevents server crashes by recovering from panics
+  - Rate limiting :: Controls request frequency to prevent abuse
+  - OpenTelemetry integration :: For distributed tracing and performance monitoring
+  - Prometheus metrics :: Exposes metrics for monitoring and alerting
+  - JWT authentication :: Secures API endpoints with token-based authentication
+  These middleware components can be selectively applied to different routes to enforce security policies and collect operational data.
+
+*** Event handling
 
 - Event processing :: The API server integrates with an event processing system that:
-  - Provides access to event queue :: Through the Models structure
-  - Enables event publishing :: Allowing HTTP handlers to queue events for processing
-  - Promotes decoupling :: HTTP request handling is decoupled from event processing
-  - Supports asynchronous operations :: Long-running tasks can be processed outside the request-response cycle
-  This integration enables a more scalable and resilient architecture for handling operations that don't need to be completed within the HTTP request lifecycle.
+  - Processes log events :: Records log messages with different severity levels
+  - Processes metric events :: Captures numeric metrics for monitoring
+  - Provides queue statistics :: Exposes information about the event queue size
+  - Supports asynchronous processing :: Events are queued for later processing
+  This enables a decoupled architecture where API requests can quickly return while events are processed asynchronously.
 
 ** Design and implementation
 
@@ -178,33 +190,160 @@ func (api *ApiServer) getReqIDContext(r *http.Request) string {
 }
   #+END_SRC
 
-*** Models integration
+*** Middleware implementation
 
-- Models access :: The API server provides access to data models and event queue
-  - Models structure containing the event queue
-  - API handlers can access models to enqueue events
-  - Promotes separation of concerns between request handling and event processing
+- Context middleware :: The `setContextHandler` middleware ensures each request has a request ID in its context
   #+BEGIN_SRC go
-// Example of a handler using the models to enqueue an event
+func (api *ApiServer) setContextHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = api.setReqIDContext(r)
+		next.ServeHTTP(w, r)
+	})
+}
+  #+END_SRC
+
+- Panic recovery :: The `panicRecovery` middleware catches panics to prevent server crashes
+  #+BEGIN_SRC go
+func (api *ApiServer) panicRecovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if panicErr := recover(); panicErr != nil {
+				w.Header().Set("Connection", "close")
+				api.serverErrorResponse(w, r, fmt.Errorf("%s, %s", panicErr, debug.Stack()))
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+  #+END_SRC
+
+- OpenTelemetry integration :: The `otelHandler` middleware adds distributed tracing
+  #+BEGIN_SRC go
+func (api *ApiServer) otelHandler(next http.Handler) http.Handler {
+	newNext := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := api.getReqIDContext(r)
+		span := trace.SpanFromContext(r.Context())
+		if reqID != "" {
+			span.SetAttributes(attribute.String("http.request.id", reqID))
+		}
+		next.ServeHTTP(w, r)
+	})
+
+	return otelhttp.NewHandler(newNext, "otel.instrumented.handler")
+}
+  #+END_SRC
+
+- Prometheus metrics :: The `promHandler` middleware collects metrics for monitoring
+  #+BEGIN_SRC go
+func (api *ApiServer) promHandler(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		observ.PromHttpTotalRequests.WithLabelValues().Inc()
+		observ.PromHttpTotalPathRequests.WithLabelValues(r.RequestURI).Inc()
+		pTimer := prometheus.NewTimer(observ.PromHttpDuration.WithLabelValues(r.RequestURI))
+		defer pTimer.ObserveDuration()
+		snoopMetrics := httpsnoop.CaptureMetrics(next, w, r)
+		observ.PromHttpTotalResponse.WithLabelValues().Inc()
+		observ.PromHttpResponseStatus.WithLabelValues(r.RequestURI, strconv.Itoa(snoopMetrics.Code)).Inc()
+	}
+}
+  #+END_SRC
+
+- Rate limiting :: The `rateLimit` middleware implements global and per-client rate limiting
+  #+BEGIN_SRC go
+func (api *ApiServer) rateLimit(next http.Handler) http.Handler {
+	if api.Cfg.RateLimit.Enabled {
+		// Global rate limiter
+		busrtSize := api.Cfg.RateLimit.GlobalRateLimit + api.Cfg.RateLimit.GlobalRateLimit/10
+		nRL := rate.NewLimiter(rate.Limit(api.Cfg.RateLimit.GlobalRateLimit), int(busrtSize))
+
+		// Per IP or Per Client rate limiter
+		pcbusrtSize := api.Cfg.RateLimit.perClientRateLimit + api.Cfg.RateLimit.perClientRateLimit/10
+		pcnRL := make(map[string]*ClientRateLimiter)
+
+		expirationTime := 30 * time.Second
+
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Apply rate limiting logic here
+			// ... (implementation details)
+			next.ServeHTTP(w, r)
+		})
+	} else {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+  #+END_SRC
+
+- JWT authentication :: The `JWTAuth` middleware validates JWT tokens for secure access
+  #+BEGIN_SRC go
+func (api *ApiServer) JWTAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// JWT validation logic here
+		// ... (implementation details)
+		next.ServeHTTP(w, r)
+	}
+}
+  #+END_SRC
+
+*** Event handling implementation
+
+- Event creation :: The `createEventHandler` processes incoming event creation requests
+  #+BEGIN_SRC go
 func (api *ApiServer) createEventHandler(w http.ResponseWriter, r *http.Request) {
-	// Create a new event
-	event := data.NewEventLog(
-		uuid.New().String(),
-		"info",
-		"Event created via API",
-	)
-	
-	// Enqueue the event for processing
-	err := api.models.EventQueue.PutEvent(r.Context(), event)
+	ctx, span := otel.Tracer("createEventHandler.Tracer").Start(r.Context(), "createEventHandler.Span")
+	defer span.End()
+
+	// Reading the request body
+	nReq, err := helpers.ReadJson[EventCreateReq](ctx, w, r)
 	if err != nil {
-		// Handle error (e.g., queue full)
-		http.Error(w, "Failed to queue event", http.StatusServiceUnavailable)
+		// Error handling
 		return
 	}
-	
+
+	// Input validation
+	// ... (validation logic)
+
+	// Create the appropriate event type
+	var nEvent data.Event
+	switch nReq.Event.EventType {
+	case data.EventTypeLog:
+		nEvent = data.NewEventLog(nReq.Event.EventID, *nReq.Event.Level, *nReq.Event.Message)
+	case data.EventTypeMetric:
+		nEvent = data.NewEventMetric(nReq.Event.EventID, *nReq.Event.Value)
+	}
+
+	// Queue the event for processing
+	err = api.models.EventQueue.PutEvent(ctx, nEvent)
+	if err != nil {
+		// Error handling
+		return
+	}
+
 	// Respond with success
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte(`{"status":"event queued for processing"}`))
+	nRes := NewEventCreateRes(nReq.Event.EventType, nReq.Event.EventID, nReq.Event.Value, nReq.Event.Level, nReq.Event.Message)
+	helpers.WriteJson(ctx, w, http.StatusOK, helpers.Envelope{"event": nRes}, nil)
+}
+  #+END_SRC
+
+- Event statistics :: The `GetEventStatsHandler` provides information about the event queue
+  #+BEGIN_SRC go
+func (api *ApiServer) GetEventStatsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("GetEventStatsHandler.Tracer").Start(r.Context(), "GetEventStatsHandler.Span")
+	defer span.End()
+
+	// Get queue size
+	queueCurrentSize := api.models.EventQueue.Size(ctx)
+
+	// Log the request
+	api.Logger.Info().
+		Int64("queue_size", int64(queueCurrentSize)).
+		Str("remote_addr", r.RemoteAddr).
+		Msg("fetched the event queue size")
+
+	// Return queue statistics
+	nRes := NewEventStatsGetRes(uint64(queueCurrentSize))
+	helpers.WriteJson(ctx, w, http.StatusOK, helpers.Envelope{"result": nRes}, nil)
 }
   #+END_SRC
 
@@ -218,269 +357,260 @@ Example of creating and configuring the API server:
 package main
 
 import (
-    "net/url"
-    "os"
-    "time"
-    
-    "github.com/cybrarymin/behavox/api"
-    "github.com/cybrarymin/behavox/internal/models"
-    "github.com/rs/zerolog"
+	"net/url"
+	"os"
+	"time"
+	
+	"github.com/cybrarymin/behavox/api"
+	"github.com/cybrarymin/behavox/internal/models"
+	"github.com/rs/zerolog"
 )
 
 func main() {
-    // Create a logger
-    logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-    
-    // Parse the listen address
-    listenURL, _ := url.Parse("http://localhost:8080")
-    
-    // Create the API server configuration
-    cfg := api.NewApiServerCfg(
-        listenURL,                  // Listen address
-        "",                         // TLS cert file (empty for HTTP)
-        "",                         // TLS key file (empty for HTTP)
-        true,                       // Enable rate limiting
-        100,                        // Global rate limit: 100 requests/second
-        10,                         // Per-client rate limit: 10 requests/second
-        time.Second*10,             // Read timeout
-        time.Second*120,            // Idle timeout
-        time.Second*10,             // Write timeout
-    )
-    
-    // Create event queue and models
-    eventQueue := models.NewEventQueue()
-    appModels := models.NewModels(eventQueue, nil, nil)
-    
-    // Create the API server
-    server := api.NewApiServer(cfg, &logger, appModels)
-    
-    // Server is now ready for route configuration and startup
+	// Create a logger
+	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	
+	// Parse the listen address
+	listenURL, _ := url.Parse("http://localhost:8080")
+	
+	// Create the API server configuration
+	cfg := api.NewApiServerCfg(
+		listenURL,                  // Listen address
+		"",                         // TLS cert file (empty for HTTP)
+		"",                         // TLS key file (empty for HTTP)
+		true,                       // Enable rate limiting
+		100,                        // Global rate limit: 100 requests/second
+		10,                         // Per-client rate limit: 10 requests/second
+		time.Second*10,             // Read timeout
+		time.Second*120,            // Idle timeout
+		time.Second*10,             // Write timeout
+	)
+	
+	// Create event queue and models
+	eventQueue := models.NewEventQueue()
+	appModels := models.NewModels(eventQueue, nil, nil)
+	
+	// Create the API server
+	server := api.NewApiServer(cfg, &logger, appModels)
+	
+	// Server is now ready for route configuration and startup
 }
 #+END_SRC
 
-*** Handling request context
+*** Handling events
 
-Example of using the request context in a handler:
+Example of creating events via the API:
 
 #+BEGIN_SRC go
 package main
 
 import (
-    "net/http"
-    
-    "github.com/cybrarymin/behavox/api"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+
+	"github.com/google/uuid"
 )
 
-func main() {
-    // ... server initialization from previous example ...
-    
-    // Example handler that uses the request ID
-    logRequestHandler := func(w http.ResponseWriter, r *http.Request) {
-        // Get request ID from context
-        requestID := server.getReqIDContext(r)
-        
-        // Log with request ID
-        server.Logger.Info().
-            Str("request_id", requestID).
-            Str("path", r.URL.Path).
-            Msg("Handling request")
-        
-        // Handle the request
-        w.Write([]byte("Request processed successfully"))
-    }
-    
-    // Create a wrapped handler that ensures request ID is set
-    wrappedHandler := server.setContextHandler(http.HandlerFunc(logRequestHandler))
-    
-    // Register the handler
-    http.Handle("/api/example", wrappedHandler)
+func createLogEvent() {
+	// Create a log event
+	eventID := uuid.New().String()
+	level := "info"
+	message := "Test log message"
+	
+	// Create the request payload
+	payload := map[string]interface{}{
+		"event": map[string]interface{}{
+			"event_type": "log",
+			"event_id":   eventID,
+			"level":      level,
+			"message":    message,
+		},
+	}
+	
+	// Marshal to JSON
+	jsonData, _ := json.Marshal(payload)
+	
+	// Create the HTTP request
+	req, _ := http.NewRequest("POST", "http://localhost:8080/v1/events", bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer YOUR_JWT_TOKEN")
+	
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+	defer resp.Body.Close()
+	
+	// Process the response
+	fmt.Println("Response Status:", resp.Status)
+}
+
+func createMetricEvent() {
+	// Create a metric event
+	eventID := uuid.New().String()
+	value := 42.5
+	
+	// Create the request payload
+	payload := map[string]interface{}{
+		"event": map[string]interface{}{
+			"event_type": "metric",
+			"event_id":   eventID,
+			"value":      value,
+		},
+	}
+	
+	// Marshal to JSON
+	jsonData, _ := json.Marshal(payload)
+	
+	// Create the HTTP request
+	req, _ := http.NewRequest("POST", "http://localhost:8080/v1/events", bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer YOUR_JWT_TOKEN")
+	
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+	defer resp.Body.Close()
+	
+	// Process the response
+	fmt.Println("Response Status:", resp.Status)
 }
 #+END_SRC
 
-*** Working with events
+*** Middleware usage
 
-Example of creating and processing events:
+Example of custom middleware implementation using the API server's middleware components:
 
 #+BEGIN_SRC go
 package main
 
 import (
-    "net/http"
-    "context"
-    
-    "github.com/cybrarymin/behavox/api"
-    "github.com/cybrarymin/behavox/internal/models"
-    "github.com/google/uuid"
+	"net/http"
+	
+	"github.com/cybrarymin/behavox/api"
 )
 
-func registerEventHandlers(server *api.ApiServer) {
-    // Handler for creating log events
-    http.HandleFunc("/api/events/log", func(w http.ResponseWriter, r *http.Request) {
-        // Parse request parameters
-        level := r.URL.Query().Get("level")
-        message := r.URL.Query().Get("message")
-        
-        if level == "" || message == "" {
-            http.Error(w, "Missing required parameters", http.StatusBadRequest)
-            return
-        }
-        
-        // Create log event
-        logEvent := models.NewEventLog(
-            uuid.New().String(),
-            level,
-            message,
-        )
-        
-        // Add event to queue
-        err := server.models.EventQueue.PutEvent(r.Context(), logEvent)
-        if err != nil {
-            http.Error(w, "Failed to queue event: "+err.Error(), http.StatusInternalServerError)
-            return
-        }
-        
-        // Respond with success
-        w.Header().Set("Content-Type", "application/json")
-        w.Write([]byte(`{"status":"success","message":"Event queued for processing"}`))
-    })
-    
-    // Handler for creating metric events
-    http.HandleFunc("/api/events/metric", func(w http.ResponseWriter, r *http.Request) {
-        // Parse value parameter
-        valueStr := r.URL.Query().Get("value")
-        if valueStr == "" {
-            http.Error(w, "Missing value parameter", http.StatusBadRequest)
-            return
-        }
-        
-        value, err := strconv.ParseFloat(valueStr, 64)
-        if err != nil {
-            http.Error(w, "Invalid value format", http.StatusBadRequest)
-            return
-        }
-        
-        // Create metric event
-        metricEvent := models.NewEventMetric(
-            uuid.New().String(),
-            value,
-        )
-        
-        // Add event to queue
-        err = server.models.EventQueue.PutEvent(r.Context(), metricEvent)
-        if err != nil {
-            http.Error(w, "Failed to queue event: "+err.Error(), http.StatusInternalServerError)
-            return
-        }
-        
-        // Respond with success
-        w.Header().Set("Content-Type", "application/json")
-        w.Write([]byte(`{"status":"success","message":"Metric event queued for processing"}`))
-    })
+func customHandler(w http.ResponseWriter, r *http.Request) {
+	// Your handler logic here
+	w.Write([]byte("Hello, World!"))
+}
+
+func setupRoutes(server *api.ApiServer) http.Handler {
+	// Create a handler chain with all middleware
+	handler := http.HandlerFunc(customHandler)
+	
+	// Apply middleware in the desired order
+	securedHandler := server.JWTAuth(handler)                  // Require JWT authentication
+	metricHandler := server.promHandler(securedHandler)        // Collect Prometheus metrics
+	
+	// Create final handler chain
+	finalHandler := server.panicRecovery(                      // Recover from panics
+		server.setContextHandler(                           // Set request ID
+			server.otelHandler(                          // Add tracing
+				server.rateLimit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					metricHandler(w, r)              // Apply rate limiting to the chain
+				})),
+			),
+		),
+	)
+	
+	return finalHandler
 }
 #+END_SRC
 
 *** Complete server initialization
 
-Example of a complete server initialization with event processing:
+Example of a complete server initialization with proper shutdown handling:
 
 #+BEGIN_SRC go
 package main
 
 import (
-    "context"
-    "log"
-    "net/http"
-    "net/url"
-    "os"
-    "os/signal"
-    "syscall"
-    "time"
-    
-    "github.com/cybrarymin/behavox/api"
-    "github.com/cybrarymin/behavox/api/observability"
-    "github.com/cybrarymin/behavox/internal/models"
-    "github.com/cybrarymin/behavox/worker"
-    "github.com/rs/zerolog"
+	"context"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+	
+	"github.com/cybrarymin/behavox/api"
+	"github.com/cybrarymin/behavox/internal/models"
+	"github.com/rs/zerolog"
 )
 
 func main() {
-    // Initialize context
-    ctx := context.Background()
-    
-    // Initialize logger
-    logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-    
-    // Create event queue
-    models.CmdEventQueueSize = 100
-    eventQueue := models.NewEventQueue()
-    appModels := models.NewModels(eventQueue, nil, nil)
-    
-    // Initialize worker
-    worker.CmdProcessedEventFile = "processed_events.json"
-    workerInstance := worker.NewWorker(&logger, eventQueue, ctx)
-    
-    // Start worker in background
-    go workerInstance.Run(ctx)
-    
-    // Initialize observability
-    observ.PromInit(eventQueue, "1.0.0")
-    
-    // Create server configuration
-    listenURL, _ := url.Parse("http://localhost:8080")
-    cfg := api.NewApiServerCfg(
-        listenURL,
-        "",
-        "",
-        true,
-        100,
-        10,
-        time.Second*10,
-        time.Second*120,
-        time.Second*10,
-    )
-    
-    // Create API server
-    server := api.NewApiServer(cfg, &logger, appModels)
-    
-    // Configure HTTP server
-    httpServer := &http.Server{
-        Addr:         cfg.ListenAddr.Host,
-        Handler:      server.routes(),
-        ReadTimeout:  cfg.ServerReadTimeout,
-        WriteTimeout: cfg.ServerWriteTimeout,
-        IdleTimeout:  cfg.ServerIdleTimeout,
-    }
-    
-    // Start HTTP server
-    go func() {
-        logger.Info().Str("addr", httpServer.Addr).Msg("Starting HTTP server")
-        if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            logger.Fatal().Err(err).Msg("HTTP server error")
-        }
-    }()
-    
-    // Wait for shutdown signal
-    stop := make(chan os.Signal, 1)
-    signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-    <-stop
-    
-    // Graceful shutdown
-    logger.Info().Msg("Shutting down server...")
-    
-    // Create shutdown context with timeout
-    shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
-    
-    // Shutdown HTTP server
-    if err := httpServer.Shutdown(shutdownCtx); err != nil {
-        logger.Fatal().Err(err).Msg("Server shutdown failed")
-    }
-    
-    // Shutdown worker
-    if err := workerInstance.Shutdown(shutdownCtx); err != nil {
-        logger.Fatal().Err(err).Msg("Worker shutdown failed")
-    }
-    
-    logger.Info().Msg("Server exited properly")
+	// Create context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	
+	// Initialize logger
+	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	
+	// Create event queue and models
+	eventQueue := models.NewEventQueue()
+	appModels := models.NewModels(eventQueue, nil, nil)
+	
+	// Create API server configuration
+	listenURL, _ := url.Parse("http://localhost:8080")
+	cfg := api.NewApiServerCfg(
+		listenURL,
+		"",
+		"",
+		true,
+		100,
+		10,
+		time.Second*10,
+		time.Second*120,
+		time.Second*10,
+	)
+	
+	// Create API server
+	server := api.NewApiServer(cfg, &logger, appModels)
+	
+	// Configure HTTP server
+	httpServer := &http.Server{
+		Addr:         cfg.ListenAddr.Host,
+		Handler:      server.routes(),
+		ReadTimeout:  cfg.ServerReadTimeout,
+		WriteTimeout: cfg.ServerWriteTimeout,
+		IdleTimeout:  cfg.ServerIdleTimeout,
+	}
+	
+	// Start HTTP server
+	go func() {
+		logger.Info().Str("addr", httpServer.Addr).Msg("Starting HTTP server")
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatal().Err(err).Msg("HTTP server error")
+		}
+	}()
+	
+	// Wait for termination signal
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+	
+	// Graceful shutdown
+	logger.Info().Msg("Shutting down server...")
+	
+	// Create shutdown timeout context
+	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer shutdownCancel()
+	
+	// Shutdown HTTP server
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		logger.Fatal().Err(err).Msg("Server shutdown failed")
+	}
+	
+	logger.Info().Msg("Server gracefully stopped")
 }
 #+END_SRC

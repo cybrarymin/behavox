@@ -1,0 +1,684 @@
+* API Event Handling
+:PROPERTIES:
+:TOC: :include descendants
+:END:
+
+:CONTENTS:
+- [[#concepts-and-purpose][Concepts and purpose]]
+  - [[#event-creation-and-processing][Event creation and processing]]
+  - [[#event-type-validation][Event type validation]]
+  - [[#distributed-tracing-integration][Distributed tracing integration]]
+  - [[#queue-statistics][Queue statistics]]
+- [[#design-and-implementation][Design and implementation]]
+  - [[#event-request-and-response-structures][Event request and response structures]]
+  - [[#event-creation-handler][Event creation handler]]
+  - [[#request-validation][Request validation]]
+  - [[#event-queuing][Event queuing]]
+  - [[#queue-statistics-handler][Queue statistics handler]]
+- [[#usage-examples][Usage examples]]
+  - [[#creating-a-log-event][Creating a log event]]
+  - [[#creating-a-metric-event][Creating a metric event]]
+  - [[#handling-validation-errors][Handling validation errors]]
+  - [[#retrieving-queue-statistics][Retrieving queue statistics]]
+:END:
+
+** Concepts and purpose
+
+*** Event creation and processing
+
+- Event handling :: The API server provides endpoints for event creation and management that:
+  - Accept event creation requests :: Process and validate incoming event creation requests
+  - Support multiple event types :: Handle both log and metric event types
+  - Queue events for processing :: Add validated events to the processing queue
+  - Report queue statistics :: Provide metrics about the current queue state
+  This event handling system forms the core functionality of the API, enabling asynchronous processing of events submitted by clients.
+
+*** Event type validation
+
+- Type-specific validation :: The API enforces different validation rules based on event type:
+  - Log events :: Require level and message fields, but no value field
+  - Metric events :: Require a value field, but no level or message fields
+  - Type enforcement :: Ensures each event type contains only the appropriate fields
+  - Required fields :: Validates that all required fields for a specific event type are present
+  This validation ensures that events are well-formed before being queued for processing.
+
+*** Distributed tracing integration
+
+- OpenTelemetry tracing :: The event handlers are instrumented with OpenTelemetry for:
+  - Request tracing :: Each event creation request is traced from receipt to completion
+  - Error tracking :: Validation and processing errors are recorded in spans
+  - Performance monitoring :: Request processing time is captured for analysis
+  - Cross-component correlation :: Traces connect API handling to event processing
+  This instrumentation provides visibility into event flow through the system.
+
+*** Queue statistics
+
+- Queue monitoring :: The API provides statistics about the event queue:
+  - Current queue size :: Reports how many events are currently waiting for processing
+  - Capacity utilization :: Allows monitoring of queue utilization against capacity
+  - Operational status :: Enables assessment of system processing backlog
+  This monitoring capability helps in understanding the current load on the system.
+
+** Design and implementation
+
+*** Event request and response structures
+
+- Request structure :: The `EventCreateReq` struct defines the event creation request format
+  - Event type :: The type of event to create (log or metric)
+  - Event ID :: Unique identifier for the event
+  - Type-specific fields :: Value for metric events; level and message for log events
+  #+BEGIN_SRC go
+type EventCreateReq struct {
+	Event struct {
+		EventType string   `json:"event_type"`
+		EventID   string   `json:"event_id"`
+		Value     *float64 `json:"value,omitempty"`
+		Level     *string  `json:"level,omitempty"`
+		Message   *string  `json:"message,omitempty"`
+	} `json:"event"`
+}
+  #+END_SRC
+
+- Request factory :: The `NewEventCreateReq` function creates a new event request
+  #+BEGIN_SRC go
+func NewEventCreateReq(eventType string, eventID string, value *float64, level *string, message *string) *EventCreateReq {
+	return &EventCreateReq{
+		Event: struct {
+			EventType string   "json:\"event_type\""
+			EventID   string   "json:\"event_id\""
+			Value     *float64 "json:\"value,omitempty\""
+			Level     *string  "json:\"level,omitempty\""
+			Message   *string  "json:\"message,omitempty\""
+		}{
+			EventType: eventType,
+			EventID:   eventID,
+			Value:     value,
+			Level:     level,
+			Message:   message,
+		},
+	}
+}
+  #+END_SRC
+
+- Response structure :: The `EventCreateRes` struct defines the event creation response format
+  - Mirrors request :: Contains the same fields as the request for confirmation
+  #+BEGIN_SRC go
+type EventCreateRes struct {
+	Event struct {
+		EventType string   `json:"event_type"`
+		EventID   string   `json:"event_id"`
+		Value     *float64 `json:"value,omitempty"`
+		Level     *string  `json:"level,omitempty"`
+		Message   *string  `json:"message,omitempty"`
+	} `json:"event"`
+}
+  #+END_SRC
+
+- Response factory :: The `NewEventCreateRes` function creates a new event response
+  #+BEGIN_SRC go
+func NewEventCreateRes(eventType string, eventID string, value *float64, level *string, message *string) *EventCreateRes {
+	return &EventCreateRes{
+		Event: struct {
+			EventType string   "json:\"event_type\""
+			EventID   string   "json:\"event_id\""
+			Value     *float64 "json:\"value,omitempty\""
+			Level     *string  "json:\"level,omitempty\""
+			Message   *string  "json:\"message,omitempty\""
+		}{
+			EventType: eventType,
+			EventID:   eventID,
+			Value:     value,
+			Level:     level,
+			Message:   message,
+		},
+	}
+}
+  #+END_SRC
+
+*** Event creation handler
+
+- Event handler :: The `createEventHandler` method processes event creation requests
+  - Starts tracing :: Creates an OpenTelemetry span for the request
+  - Parses request :: Reads and parses the JSON request body
+  - Validates input :: Checks the request against event-specific validation rules
+  - Creates event :: Creates the appropriate event type based on the request
+  - Queues event :: Adds the event to the processing queue
+  - Responds to client :: Returns the created event details on success
+  #+BEGIN_SRC go
+func (api *ApiServer) createEventHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("createEventHandler.Tracer").Start(r.Context(), "createEventHandler.Span")
+	defer span.End()
+
+	// Reading the request body
+	nReq, err := helpers.ReadJson[EventCreateReq](ctx, w, r)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid input")
+		api.badRequestResponse(w, r, err)
+		return
+	}
+
+	// Input validation
+	// [Validation code omitted for brevity]
+
+	// Create appropriate event based on type
+	var nEvent data.Event
+	switch nReq.Event.EventType {
+	case data.EventTypeLog:
+		// [Log event creation code omitted for brevity]
+		nEvent = data.NewEventLog(nReq.Event.EventID, *nReq.Event.Level, *nReq.Event.Message)
+		span.AddEvent("new log event created")
+
+	case data.EventTypeMetric:
+		// [Metric event creation code omitted for brevity]
+		nEvent = data.NewEventMetric(nReq.Event.EventID, *nReq.Event.Value)
+		span.AddEvent("new metric event created")
+	}
+
+	// Queue the event
+	err = api.models.EventQueue.PutEvent(ctx, nEvent)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to add new event into the queue")
+		api.eventQueueFullResponse(w, r)
+	}
+
+	// Create and return response
+	nRes := NewEventCreateRes(nReq.Event.EventType, nReq.Event.EventID, nReq.Event.Value, nReq.Event.Level, nReq.Event.Message)
+	err = helpers.WriteJson(ctx, w, http.StatusOK, helpers.Envelope{"event": nRes}, nil)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to write the response for the client")
+		api.serverErrorResponse(w, r, err)
+		return
+	}
+}
+  #+END_SRC
+
+*** Request validation
+
+- Validation logic :: The handler implements comprehensive validation:
+  - Event ID validation :: Ensures the event ID is a valid UUID
+  - Event type validation :: Validates that the event type is supported (log or metric)
+  - Type-specific field validation :: Ensures appropriate fields are present based on event type
+  - Field constraints :: Applies any constraints on field values
+  This validation ensures that only well-formed events enter the processing queue.
+  #+BEGIN_SRC go
+// Input validation
+nVal := helpers.NewValidator()
+_, err = uuid.Parse(nReq.Event.EventID)
+if err != nil {
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "invalid input")
+	api.badRequestResponse(w, r, fmt.Errorf("event_id should be a valid uuid"))
+	return
+}
+nVal.Check(nReq.Event.EventType != "", "event_type", "shouldn't be nil")
+validEventTypes := []string{data.EventTypeLog, data.EventTypeMetric}
+nVal.Check(helpers.In(nReq.Event.EventType, validEventTypes...), "event_type", "invalid")
+
+switch nReq.Event.EventType {
+case data.EventTypeLog:
+	if nReq.Event.Value != nil {
+		api.badRequestResponse(w, r, fmt.Errorf("body contains unknown field \"value\""))
+		return
+	}
+	nVal.Check(nReq.Event.Level != nil, "level", "shouldn't be nil")
+	nVal.Check(nReq.Event.Message != nil, "message", "shouldn't be nil")
+
+case data.EventTypeMetric:
+	switch {
+	case nReq.Event.Level != nil:
+		api.badRequestResponse(w, r, fmt.Errorf("body contains unknown field \"level\""))
+		return
+	case nReq.Event.Message != nil:
+		api.badRequestResponse(w, r, fmt.Errorf("body contains unknown field \"message\""))
+		return
+	}
+	nVal.Check(nReq.Event.Value != nil, "value", "shouldn't be nil")
+}
+
+if !nVal.Valid() {
+	for key, errString := range nVal.Errors {
+		err := fmt.Errorf("%s message %s", key, errString)
+		span.RecordError(err)
+	}
+	span.SetStatus(codes.Error, "invalid input")
+	api.failedValidationResponse(w, r, nVal.Errors)
+	return
+}
+  #+END_SRC
+
+*** Event queuing
+
+- Queue integration :: The handler adds valid events to the processing queue:
+  - Uses the EventQueue :: Accesses the queue through the models structure
+  - Error handling :: Handles queue-full scenarios appropriately
+  - Tracing :: Records the queuing operation in the span
+  The queue serves as the bridge between the API and asynchronous processing.
+  #+BEGIN_SRC go
+// Queue the event
+err = api.models.EventQueue.PutEvent(ctx, nEvent)
+if err != nil {
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "failed to add new event into the queue")
+	api.eventQueueFullResponse(w, r)
+	return
+}
+  #+END_SRC
+
+*** Queue statistics handler
+
+- Statistics endpoint :: The `GetEventStatsHandler` method provides queue statistics
+  - Current size :: Reports the current number of events in the queue
+  - Structured response :: Returns statistics in a consistent JSON format
+  - Tracing :: Includes tracing for monitoring and debugging
+  This endpoint enables monitoring of the queue status.
+  #+BEGIN_SRC go
+type EventStatsGetRes struct {
+	Queue_size uint64 `json:"queue_size"`
+}
+
+func NewEventStatsGetRes(qSize uint64) *EventStatsGetRes {
+	return &EventStatsGetRes{
+		Queue_size: qSize,
+	}
+}
+
+func (api *ApiServer) GetEventStatsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("GetEventStatsHandler.Tracer").Start(r.Context(), "GetEventStatsHandler.Span")
+	defer span.End()
+
+	// Get current queue size
+	queueCurrentSize := api.models.EventQueue.Size(ctx)
+
+	// Log the information
+	api.Logger.Info().
+		Int64("queue_size", int64(queueCurrentSize)).
+		Str("remote_addr", r.RemoteAddr).
+		Msg("fetched the event queue size")
+
+	// Create and return response
+	nRes := NewEventStatsGetRes(uint64(queueCurrentSize))
+	err := helpers.WriteJson(ctx, w, http.StatusOK, helpers.Envelope{"result": nRes}, nil)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to write the response for the client")
+		api.serverErrorResponse(w, r, err)
+		return
+	}
+}
+  #+END_SRC
+
+** Usage examples
+
+*** Creating a log event
+
+Example of creating a log event:
+
+#+BEGIN_SRC bash
+# Using curl to send a log event
+curl -X POST https://api.example.com/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event": {
+      "event_type": "log",
+      "event_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      "level": "error",
+      "message": "Database connection failed"
+    }
+  }'
+
+# Expected successful response
+{
+  "event": {
+    "event_type": "log",
+    "event_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "level": "error",
+    "message": "Database connection failed"
+  }
+}
+#+END_SRC
+
+Example using the Go client:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	
+	"github.com/google/uuid"
+)
+
+func createLogEvent(apiURL string, level, message string) error {
+	// Generate a new UUID for the event
+	eventID := uuid.New().String()
+	
+	// Create the request body
+	reqBody := map[string]interface{}{
+		"event": map[string]interface{}{
+			"event_type": "log",
+			"event_id":   eventID,
+			"level":      level,
+			"message":    message,
+		},
+	}
+	
+	// Convert to JSON
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("error marshaling request: %w", err)
+	}
+	
+	// Send the request
+	resp, err := http.Post(apiURL+"/v1/events", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	// Check the response
+	if resp.StatusCode != http.StatusOK {
+		var errorResp map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
+			return fmt.Errorf("error response with status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("API error: %v", errorResp["error"])
+	}
+	
+	// Success
+	fmt.Printf("Log event created successfully with ID: %s\n", eventID)
+	return nil
+}
+
+func main() {
+	err := createLogEvent("https://api.example.com", "error", "Application crashed")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+	}
+}
+#+END_SRC
+
+*** Creating a metric event
+
+Example of creating a metric event:
+
+#+BEGIN_SRC bash
+# Using curl to send a metric event
+curl -X POST https://api.example.com/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event": {
+      "event_type": "metric",
+      "event_id": "a2b7c8d9-1e2f-3g4h-5i6j-7k8l9m0n1o2p",
+      "value": 95.8
+    }
+  }'
+
+# Expected successful response
+{
+  "event": {
+    "event_type": "metric",
+    "event_id": "a2b7c8d9-1e2f-3g4h-5i6j-7k8l9m0n1o2p",
+    "value": 95.8
+  }
+}
+#+END_SRC
+
+Example using the Go client:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	
+	"github.com/google/uuid"
+)
+
+func createMetricEvent(apiURL string, value float64) error {
+	// Generate a new UUID for the event
+	eventID := uuid.New().String()
+	
+	// Create the request body
+	reqBody := map[string]interface{}{
+		"event": map[string]interface{}{
+			"event_type": "metric",
+			"event_id":   eventID,
+			"value":      value,
+		},
+	}
+	
+	// Convert to JSON
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("error marshaling request: %w", err)
+	}
+	
+	// Send the request
+	resp, err := http.Post(apiURL+"/v1/events", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	// Check the response
+	if resp.StatusCode != http.StatusOK {
+		var errorResp map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
+			return fmt.Errorf("error response with status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("API error: %v", errorResp["error"])
+	}
+	
+	// Success
+	fmt.Printf("Metric event created successfully with ID: %s\n", eventID)
+	return nil
+}
+
+func main() {
+	err := createMetricEvent("https://api.example.com", 98.6)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+	}
+}
+#+END_SRC
+
+*** Handling validation errors
+
+Example of detecting and handling validation errors:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	
+	"github.com/google/uuid"
+)
+
+func createEvent(apiURL string, eventType string, params map[string]interface{}) error {
+	// Generate a new UUID for the event
+	eventID := uuid.New().String()
+	
+	// Create base request with event type and ID
+	eventData := map[string]interface{}{
+		"event_type": eventType,
+		"event_id":   eventID,
+	}
+	
+	// Add parameters based on event type
+	for k, v := range params {
+		eventData[k] = v
+	}
+	
+	// Create the full request
+	reqBody := map[string]interface{}{
+		"event": eventData,
+	}
+	
+	// Convert to JSON
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("error marshaling request: %w", err)
+	}
+	
+	// Send the request
+	resp, err := http.Post(apiURL+"/v1/events", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	// Check for validation errors (422 status)
+	if resp.StatusCode == http.StatusUnprocessableEntity {
+		var errorResp map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
+			return fmt.Errorf("validation error occurred but couldn't parse response")
+		}
+		
+		// Extract validation errors
+		errors, ok := errorResp["error"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected validation error format")
+		}
+		
+		// Build error message
+		var errorMsgs []string
+		for field, msg := range errors {
+			errorMsgs = append(errorMsgs, fmt.Sprintf("%s: %s", field, msg))
+		}
+		
+		return fmt.Errorf("validation failed: %s", strings.Join(errorMsgs, ", "))
+	}
+	
+	// Check for other errors
+	if resp.StatusCode != http.StatusOK {
+		var errorResp map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
+			return fmt.Errorf("error response with status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("API error: %v", errorResp["error"])
+	}
+	
+	// Success
+	fmt.Printf("%s event created successfully with ID: %s\n", strings.Title(eventType), eventID)
+	return nil
+}
+
+func main() {
+	// Example with validation error - missing fields for log event
+	err := createEvent("https://api.example.com", "log", map[string]interface{}{
+		// Missing required level and message
+	})
+	if err != nil {
+		fmt.Printf("Expected error: %v\n", err)
+	}
+	
+	// Example with validation error - wrong field for metric event
+	err = createEvent("https://api.example.com", "metric", map[string]interface{}{
+		"value":   98.6,
+		"message": "This field is not allowed for metric events",
+	})
+	if err != nil {
+		fmt.Printf("Expected error: %v\n", err)
+	}
+	
+	// Correct log event
+	err = createEvent("https://api.example.com", "log", map[string]interface{}{
+		"level":   "info",
+		"message": "System started successfully",
+	})
+	if err != nil {
+		fmt.Printf("Unexpected error: %v\n", err)
+	}
+}
+#+END_SRC
+
+*** Retrieving queue statistics
+
+Example of getting queue statistics:
+
+#+BEGIN_SRC bash
+# Using curl to get queue statistics
+curl -X GET https://api.example.com/v1/stats
+
+# Expected successful response
+{
+  "result": {
+    "queue_size": 42
+  }
+}
+#+END_SRC
+
+Example using the Go client:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+)
+
+type QueueStats struct {
+	Result struct {
+		QueueSize uint64 `json:"queue_size"`
+	} `json:"result"`
+}
+
+func getQueueStats(apiURL string) (*QueueStats, error) {
+	// Send the request
+	resp, err := http.Get(apiURL + "/v1/stats")
+	if err != nil {
+		return nil, fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	// Check for errors
+	if resp.StatusCode != http.StatusOK {
+		var errorResp map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
+			return nil, fmt.Errorf("error response with status %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("API error: %v", errorResp["error"])
+	}
+	
+	// Parse the response
+	var stats QueueStats
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return nil, fmt.Errorf("error parsing response: %w", err)
+	}
+	
+	return &stats, nil
+}
+
+func main() {
+	stats, err := getQueueStats("https://api.example.com")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	
+	fmt.Printf("Current queue size: %d events\n", stats.Result.QueueSize)
+	
+	// Example of using stats for monitoring
+	if stats.Result.QueueSize > 100 {
+		fmt.Println("WARNING: Queue size exceeding normal levels!")
+	} else {
+		fmt.Println("Queue size normal.")
+	}
+}
+#+END_SRC

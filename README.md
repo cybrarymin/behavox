@@ -6,3 +6,12 @@
 6- OpenSwagger Documentation
 7- Implement worker -> done
 8- Work on worker concurrency event processing
+
+
+
+Create a .envrc
+export LISTEN_ADDR="https://0.0.0.0:443"
+export JWTKEY="lkaskdjoqoiwjekqmnwklemqlkwejmq"
+export ADMINUSER="behavox-admin"
+export ADMINPASS="behavox-pass"
+export LOGLVL="debug"

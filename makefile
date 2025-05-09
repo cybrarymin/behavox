@@ -55,12 +55,18 @@ run/api:
 	--listen-addr ${LISTEN_ADDR} \
 	--cert /tmp/cert.pem  \
 	--cert-key /tmp/key.pem \
-	--enable-rate-limit=true \
-	--event-queue-size=100 
+	--enable-rate-limit=false \
+	--event-queue-size=100 \
+	--event-queue-max-worker-threads=10 \
+	--api-admin-user ${ADMINUSER} \
+	--api-admin-pass ${ADMINPASS} \
+	--jwkey ${JWTKEY}
+
 
 #================================================================#
 # QUALITY CHECK , LINTING, Vendoring
 #================================================================#
+## audit: runs the application audit checks such as tests, lintings, staticchecks and ....
 .PHONY: audit
 audit: prerequsite
 	@echo "Tidying and verifying golang packages and module dependencies..."
@@ -87,6 +93,7 @@ vendor:
 #================================================================#
 # Swagger documentation
 #================================================================#
+## docs/swagger: is used to generate the OpenAPIswagger docs 
 .PHONY: docs/swagger
 docs/swagger:
 	@swag fmt

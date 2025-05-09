@@ -1,70 +1,109 @@
-* HTTP Middleware
+* API Middlewares
 :PROPERTIES:
 :TOC: :include descendants
 :END:
 
 :CONTENTS:
 - [[#concepts-and-purpose][Concepts and purpose]]
-  - [[#api-server-middleware-components][API server middleware components]]
-  - [[#request-context-and-observability][Request context and observability]]
+  - [[#middleware-and-request-processing-pipeline][Middleware and request processing pipeline]]
+  - [[#request-context-management][Request context management]]
+  - [[#panic-recovery][Panic recovery]]
+  - [[#observability-integration][Observability integration]]
+  - [[#rate-limiting][Rate limiting]]
 - [[#design-and-implementation][Design and implementation]]
-  - [[#context-handling-middleware][Context handling middleware]]
+  - [[#context-middleware][Context middleware]]
   - [[#panic-recovery-middleware][Panic recovery middleware]]
-  - [[#opentelemetry-instrumentation][OpenTelemetry instrumentation]]
+  - [[#opentelemetry-middleware][OpenTelemetry middleware]]
   - [[#prometheus-metrics-middleware][Prometheus metrics middleware]]
-  - [[#rate-limiting-implementation][Rate limiting implementation]]
+  - [[#rate-limiting-middleware][Rate limiting middleware]]
 - [[#usage-examples][Usage examples]]
   - [[#configuring-middleware-chain][Configuring middleware chain]]
-  - [[#rate-limiting-configuration][Rate limiting configuration]]
-  - [[#observability-setup][Observability setup]]
+  - [[#accessing-request-id-in-handlers][Accessing request ID in handlers]]
+  - [[#custom-rate-limiting-implementation][Custom rate limiting implementation]]
+  - [[#monitoring-request-metrics][Monitoring request metrics]]
 :END:
 
 ** Concepts and purpose
 
-*** API server middleware components
+*** Middleware and request processing pipeline
 
-- HTTP middleware :: The API server uses the middleware pattern to implement cross-cutting concerns in the HTTP request handling pipeline. Each middleware wraps the next handler in the chain, performing operations before and after passing control to the next handler. The middleware components are responsible for:
-  - Request context management :: Setting and retrieving request-specific data in the context
-  - Error handling :: Recovering from panics to prevent server crashes
-  - Observability :: Instrumenting requests with OpenTelemetry tracing and Prometheus metrics
-  - Rate limiting :: Controlling request rates globally and per client to prevent abuse
-  These middleware components enhance the API server's resilience, security, and observability without cluttering the core business logic handlers.
+- Middleware chain :: The API server implements a middleware pattern for HTTP request processing:
+  - Request preprocessing :: Modifies or enriches requests before they reach handlers
+  - Response postprocessing :: Alters responses before they reach clients
+  - Cross-cutting concerns :: Addresses concerns applicable to all requests
+  - Composition :: Chains multiple middleware components for modular request processing
+  This pattern allows clean separation of concerns and enhances maintainability.
 
-*** Request context and observability
+*** Request context management
 
-- Request tracing and metrics :: The API server implements comprehensive observability through:
-  - Request IDs :: Unique identifiers assigned to each request for correlation across logs and traces
-  - OpenTelemetry integration :: Distributed tracing to track request flow across services
-  - Prometheus metrics :: Real-time monitoring of request counts, durations, and response codes
-  - Panic recovery :: Graceful handling of unexpected errors with appropriate client responses
-  These observability features help with debugging issues, monitoring performance, and understanding system behavior under various conditions.
+- Context enrichment :: Middleware adds critical information to request contexts:
+  - Request ID :: Unique identifier for each request for tracing and correlation
+  - Span context :: OpenTelemetry trace context for distributed tracing
+  - Request metadata :: Additional request-specific information
+  Context enrichment enables correlation of operations across components and services.
+
+*** Panic recovery
+
+- Error resilience :: Middleware adds resilience to HTTP request handling:
+  - Panic catching :: Recovers from panics in request handling
+  - Graceful response :: Returns an appropriate error response instead of crashing
+  - Error logging :: Records panic details for debugging
+  - Connection management :: Properly manages affected connections
+  This prevents individual request handling errors from crashing the server.
+
+*** Observability integration
+
+- Monitoring and tracing :: Middleware integrates observability tools:
+  - Distributed tracing :: OpenTelemetry instrumentation for request tracing
+  - Metrics collection :: Prometheus metrics for request counts and durations
+  - Request attribute enrichment :: Adds request-specific attributes to traces
+  - Performance monitoring :: Measures request processing times
+  These capabilities enable comprehensive monitoring and troubleshooting.
+
+*** Rate limiting
+
+- Traffic management :: Middleware implements rate limiting for request throttling:
+  - Global limits :: Controls overall request rate to the API
+  - Per-client limits :: Manages request rates from individual clients
+  - Burst handling :: Allows temporary burst over sustained rate
+  - Client identification :: Identifies clients by IP address
+  - Resource protection :: Prevents resource exhaustion from excessive requests
+  Rate limiting protects the system from overload and ensures fair resource allocation.
 
 ** Design and implementation
 
-*** Context handling middleware
+*** Context middleware
 
-- Request context setup :: The `setContextHandler` middleware enriches each HTTP request with contextual information
-  - Adds a unique request ID to each incoming request's context
-  - Enables correlation of logs, metrics, and traces for a single request
+- Request context setup :: The `setContextHandler` middleware enriches request contexts
+  - Generates and adds request ID :: Creates unique ID for each request
+  - Function signature :: Takes and returns an http.Handler for middleware chaining
+  - Request modification :: Returns a new request with updated context
   #+BEGIN_SRC go
-func (api *ApiServer) setContextHandler(next http.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+/*
+setContextHandler sets the required key, values on the http.request context
+*/
+func (api *ApiServer) setContextHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r = api.setReqIDContext(r)
 		next.ServeHTTP(w, r)
-	}
+	})
 }
   #+END_SRC
 
 *** Panic recovery middleware
 
-- Panic recovery handling :: The `panicRecovery` middleware prevents server crashes by catching panics in the request handling chain
-  - Recovers from panics that occur during request processing
-  - Sets the "Connection: close" header to ensure connection termination
-  - Returns a 500 Internal Server Error response to the client
-  - Logs the panic with a full stack trace for debugging
+- Error handling :: The `panicRecovery` middleware prevents server crashes from panics
+  - Panic catching :: Uses deferred function to catch panics
+  - Connection closure :: Sets "Connection: close" header to terminate the connection
+  - Error response :: Returns 500 Internal Server Error with error details
+  - Stack trace :: Includes stack trace in error logging
   #+BEGIN_SRC go
-func (api *ApiServer) panicRecovery(next http.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+/*
+panicRecovery handler is gonna be used to avoid server sending empty reply as a response to the client when a panic happens.
+The server will recover the panic and sends http status code 500 with internal error to the client and logs the panic with stack.
+*/
+func (api *ApiServer) panicRecovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if panicErr := recover(); panicErr != nil {
 				// Setting this header will trigger the HTTP server to close the connection after Panic happended
@@ -73,75 +112,70 @@ func (api *ApiServer) panicRecovery(next http.Handler) http.HandlerFunc {
 			}
 		}()
 		next.ServeHTTP(w, r)
-	}
+	})
 }
   #+END_SRC
 
-*** OpenTelemetry instrumentation
+*** OpenTelemetry middleware
 
-- OpenTelemetry tracing :: The `otelHandler` middleware integrates the API server with OpenTelemetry for distributed tracing
-  - Creates spans for each HTTP request
-  - Enriches spans with contextual information like request IDs
-  - Enables traceability of requests across service boundaries
-  - Provides detailed timing information for performance analysis
+- Distributed tracing :: The `otelHandler` middleware integrates OpenTelemetry tracing
+  - Span enrichment :: Adds request ID and other attributes to trace spans
+  - Trace context propagation :: Ensures trace context flows through the system
+  - Handler instrumentation :: Wraps handlers with OpenTelemetry instrumentation
   #+BEGIN_SRC go
-func (api *ApiServer) otelHandler(next http.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		/*
-			adding the request id to the context to be visible inside the span so each request can be tracable
-		*/
-		newNext := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			reqID := api.getReqIDContext(r)
-			span := trace.SpanFromContext(r.Context())
-			if reqID != "" {
-				span.SetAttributes(attribute.String("http.request.id", fmt.Sprintf("%v", reqID)))
-			}
-			next.ServeHTTP(w, r)
-		})
+/*
+otelHandler is gonna instrument the otel http handler
+*/
+func (api *ApiServer) otelHandler(next http.Handler) http.Handler {
+	newNext := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := api.getReqIDContext(r)
+		span := trace.SpanFromContext(r.Context())
+		if reqID != "" {
+			span.SetAttributes(attribute.String("http.request.id", reqID))
+		}
+		next.ServeHTTP(w, r)
+	})
 
-		nHander := otelhttp.NewHandler(newNext, "otel.instrumented.handler")
-		nHander.ServeHTTP(w, r)
-	}
+	return otelhttp.NewHandler(newNext, "otel.instrumented.handler")
 }
   #+END_SRC
 
 *** Prometheus metrics middleware
 
-- Prometheus metrics collection :: The `promHandler` middleware exposes metrics for monitoring API performance
-  - Tracks application version for deployment verification
-  - Counts total HTTP requests and responses
-  - Measures request duration by path
-  - Records response status codes by path
-  - Uses `httpsnoop` to capture metrics without interfering with the response
+- Metrics collection :: The `promHandler` middleware collects Prometheus metrics
+  - Request counting :: Increments request counters by path
+  - Response status tracking :: Records response status codes
+  - Duration measurement :: Measures request processing duration
+  - Handler wrapping :: Uses httpsnoop to capture metrics without interfering with the response
   #+BEGIN_SRC go
-func (api *ApiServer) promHandler(next http.HandlerFunc, path string) http.HandlerFunc {
-	observ.PromApplicationVersion.WithLabelValues(Version).Set(1)
+/*
+promHandler is gonna expose and calculate the prometheus metrics values on each api path.
+*/
+func (api *ApiServer) promHandler(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		observ.PromHttpTotalRequests.WithLabelValues().Inc()
-		pTimer := prometheus.NewTimer(observ.PromHttpDuration.WithLabelValues(path))
+		observ.PromHttpTotalPathRequests.WithLabelValues(r.RequestURI).Inc()
+		pTimer := prometheus.NewTimer(observ.PromHttpDuration.WithLabelValues(r.RequestURI))
 		defer pTimer.ObserveDuration()
 		snoopMetrics := httpsnoop.CaptureMetrics(next, w, r)
 		observ.PromHttpTotalResponse.WithLabelValues().Inc()
-		observ.PromHttpResponseStatus.WithLabelValues(path, strconv.Itoa(snoopMetrics.Code)).Inc()
+		observ.PromHttpResponseStatus.WithLabelValues(r.RequestURI, strconv.Itoa(snoopMetrics.Code)).Inc()
 	}
 }
   #+END_SRC
 
-*** Rate limiting implementation
+*** Rate limiting middleware
 
-- Rate limiting architecture :: The `rateLimit` middleware implements a two-tier rate limiting strategy
-  - Global rate limiter :: Controls the overall request rate to the API server
-    | ~GlobalRateLimit~ | Maximum number of requests per second for the entire API |
-    | ~Burst size~      | 110% of GlobalRateLimit to allow for temporary spikes |
-  - Per-client rate limiter :: Controls the request rate from individual clients
-    | ~perClientRateLimit~ | Maximum requests per second from a single client IP |
-    | ~Burst size~         | 110% of perClientRateLimit to allow for temporary spikes |
-    | ~Expiration time~    | 30-second timeout for removing inactive clients from memory |
-  - Client tracking :: Maintains a map of client IP addresses to their rate limiters
-    | ~ClientRateLimiter~ | Structure holding a client's rate limiter and last access time |
-    | ~LastAccessTime~    | Timer that expires client entries to prevent memory leaks |
-
+- Two-level rate limiting :: The `rateLimit` middleware implements a dual-tier rate limiting strategy
+  - Global limiter :: Controls total request rate across all clients
+  - Per-client limiter :: Controls request rate from individual clients
+  - Client tracking :: Maps client IP addresses to rate limiters
+  - Expiration mechanism :: Removes inactive clients to prevent memory leaks
+  - Concurrency protection :: Uses mutex for thread-safe client map access
   #+BEGIN_SRC go
+/*
+rateLimited is api rateLimitter middleware which blocks requests processing from same client ip more than specified threshold
+*/
 type ClientRateLimiter struct {
 	Limit          *rate.Limiter
 	LastAccessTime *time.Timer
@@ -155,56 +189,68 @@ func (api *ApiServer) rateLimit(next http.Handler) http.Handler {
 
 		// Per IP or Per Client rate limiter
 		pcbusrtSize := api.Cfg.RateLimit.perClientRateLimit + api.Cfg.RateLimit.perClientRateLimit/10
-		pcnRL := make(map[string]ClientRateLimiter)
+		pcnRL := make(map[string]*ClientRateLimiter)
 
 		expirationTime := 30 * time.Second
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !nRL.Allow() {
+			// Create the span with the current context
+			ctx, span := otel.GetTracerProvider().Tracer("rateLimit.Tracer").Start(r.Context(), "rateLimit.Span", trace.WithAttributes())
+			defer span.End()
+			span.SetAttributes(attribute.String("http.target", r.RequestURI))
+
+			// Update the request with the new context containing our span
+			r = r.WithContext(ctx)
+
+			if !nRL.Allow() { // In this code, whenever we call the Allow() method on the rate limiter exactly one token will be consumed from the bucket. And if there is no token in the bucket left Allow() will return false
+				err := errors.New("request rate limit reached, please try again later")
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "request rate limit reached, please try again later")
 				api.rateLimitExceedResponse(w, r)
 				return
 			}
 
-			// Getting client address from the http remoteAddr header
+			// Getting client address from the http remoteAddr heder
 			clientAddr, _, err := net.SplitHostPort(r.RemoteAddr)
 			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "failed to process request remote address")
 				api.serverErrorResponse(w, r, err)
 				return
 			}
 
-			api.mu.RLock()
-			_, found := pcnRL[clientAddr]
-			api.mu.RUnlock()
-
+			api.mu.Lock()
+			limiter, found := pcnRL[clientAddr]
 			// Check to see if the client address already exists inside the memory or not.
 			// If not adding the client ip address to the memory and updating the last access time of the client
 			if !found {
-				api.mu.Lock()
-				pcnRL[clientAddr] = ClientRateLimiter{
+				limiter = &ClientRateLimiter{
 					rate.NewLimiter(rate.Limit(api.Cfg.RateLimit.perClientRateLimit), int(pcbusrtSize)),
 					time.NewTimer(expirationTime),
 				}
-				api.mu.Unlock()
+				pcnRL[clientAddr] = limiter
 
-				go func() {
-					<-pcnRL[clientAddr].LastAccessTime.C
-					api.mu.RLock()
-					delete(pcnRL, clientAddr)
-					api.mu.RUnlock()
-				}()
+				go func(client string, limiter *ClientRateLimiter) {
+					<-limiter.LastAccessTime.C
+					api.mu.Lock()
+					delete(pcnRL, client)
+					api.mu.Unlock()
+				}(clientAddr, limiter)
 
 			} else {
-				api.mu.Lock()
 				api.Logger.Debug().Msgf("renewing client %v expiry of rate limiting context", clientAddr)
-				pcnRL[clientAddr].LastAccessTime.Reset(expirationTime)
-				api.mu.Unlock()
+				limiter.LastAccessTime.Reset(expirationTime)
 			}
+			api.mu.Unlock()
 
 			api.mu.RLock()
 			allow := pcnRL[clientAddr].Limit.Allow()
 			api.mu.RUnlock()
 
 			if !allow {
+				err := errors.New("request rate limit reached, please try again later")
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "request rate limit reached, please try again later")
 				api.rateLimitExceedResponse(w, r)
 				return
 			}
@@ -222,112 +268,490 @@ func (api *ApiServer) rateLimit(next http.Handler) http.Handler {
 
 *** Configuring middleware chain
 
-To set up the complete middleware chain for the API server:
+Example of configuring the complete middleware chain:
 
 #+BEGIN_SRC go
-// Initialize the API server
-apiServer := NewApiServer(config, logger)
+package main
 
-// Create a router
-router := http.NewServeMux()
-
-// Register an API handler
-handler := func(w http.ResponseWriter, r *http.Request) {
-    // API handler implementation
-}
-
-// Apply the middleware chain in the correct order
-wrappedHandler := apiServer.setContextHandler(
-    apiServer.panicRecovery(
-        apiServer.rateLimit(
-            apiServer.otelHandler(
-                http.HandlerFunc(
-                    apiServer.promHandler(handler, "/api/endpoint")
-                )
-            )
-        )
-    )
-)
-
-// Register with the router
-router.Handle("/api/endpoint", wrappedHandler)
-
-// Start the server
-server := &http.Server{
-    Addr:    ":8080",
-    Handler: router,
-}
-server.ListenAndServe()
-#+END_SRC
-
-*** Rate limiting configuration
-
-Example configuration for enabling rate limiting:
-
-#+BEGIN_SRC go
-type RateLimitConfig struct {
-    Enabled           bool
-    GlobalRateLimit   float64
-    perClientRateLimit float64
-}
-
-// Configuration example
-config := &Config{
-    RateLimit: RateLimitConfig{
-        Enabled:           true,
-        GlobalRateLimit:   100, // 100 requests per second globally
-        perClientRateLimit: 10,  // 10 requests per second per client
-    },
-}
-
-// Initialize API server with this configuration
-apiServer := NewApiServer(config, logger)
-#+END_SRC
-
-*** Observability setup
-
-Setting up the observability components:
-
-#+BEGIN_SRC go
 import (
-    "go.opentelemetry.io/otel"
-    "go.opentelemetry.io/otel/exporters/otlp/otlptrace"
-    "go.opentelemetry.io/otel/sdk/resource"
-    sdktrace "go.opentelemetry.io/otel/sdk/trace"
-    semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	"net/http"
+	
+	"github.com/cybrarymin/behavox/api"
 )
 
-// Initialize OpenTelemetry
-func initOtel(serviceName string) (*sdktrace.TracerProvider, error) {
-    exporter, err := otlptrace.New(context.Background())
-    if err != nil {
-        return nil, err
-    }
-    
-    resource := resource.NewWithAttributes(
-        semconv.SchemaURL,
-        semconv.ServiceNameKey.String(serviceName),
-    )
-    
-    tp := sdktrace.NewTracerProvider(
-        sdktrace.WithBatcher(exporter),
-        sdktrace.WithResource(resource),
-    )
-    otel.SetTracerProvider(tp)
-    
-    return tp, nil
+func setupServer() *http.Server {
+	// Initialize API server components
+	// ...
+	
+	// Create the API server
+	apiServer := api.NewApiServer(config, logger, models)
+	
+	// Define routes
+	router := apiServer.routes()
+	
+	// Apply middleware chain in the correct order
+	// 1. Panic recovery - outermost to catch all panics
+	// 2. Rate limiting - early rejection of excessive requests
+	// 3. Request context - add request ID and other context info
+	// 4. OpenTelemetry - instrument with tracing
+	// Note: Prometheus metrics are applied per-handler in the routes() method
+	handler := apiServer.panicRecovery(
+		apiServer.rateLimit(
+			apiServer.setContextHandler(
+				apiServer.otelHandler(
+					router
+				)
+			)
+		)
+	)
+	
+	// Create and return the HTTP server
+	return &http.Server{
+		Addr:         config.ListenAddr.Host,
+		Handler:      handler,
+		ReadTimeout:  config.ReadTimeout,
+		WriteTimeout: config.WriteTimeout,
+		IdleTimeout:  config.IdleTimeout,
+	}
 }
 
-// Initialize Prometheus metrics
-func initPrometheus() {
-    // Register metrics with Prometheus
-    prometheus.MustRegister(observ.PromApplicationVersion)
-    prometheus.MustRegister(observ.PromHttpTotalRequests)
-    prometheus.MustRegister(observ.PromHttpDuration)
-    prometheus.MustRegister(observ.PromHttpTotalResponse)
-    prometheus.MustRegister(observ.PromHttpResponseStatus)
-    
-    // Create Prometheus metrics endpoint
-    http.Handle("/metrics", promhttp.Handler())
+func main() {
+	server := setupServer()
+	
+	// Start the server
+	// ...
+}
+#+END_SRC
+
+*** Accessing request ID in handlers
+
+Example of accessing the request ID in an HTTP handler:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"net/http"
+	
+	"github.com/cybrarymin/behavox/api"
+	"github.com/rs/zerolog"
+)
+
+func createRequestHandler(apiServer *api.ApiServer, logger *zerolog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get request ID from context
+		requestID := apiServer.getReqIDContext(r)
+		
+		// Create a logger with request ID
+		requestLogger := logger.With().
+			Str("request_id", requestID).
+			Str("method", r.Method).
+			Str("path", r.URL.Path).
+			Logger()
+		
+		// Log request information
+		requestLogger.Info().Msg("Processing request")
+		
+		// Process the request
+		// ...
+		
+		// Include request ID in response headers
+		w.Header().Set("X-Request-ID", requestID)
+		
+		// Create response with request ID
+		response := map[string]interface{}{
+			"status":      "success",
+			"request_id":  requestID,
+			"message":     "Request processed successfully",
+		}
+		
+		// Write the response
+		helpers.WriteJson(r.Context(), w, http.StatusOK, helpers.Envelope{"result": response}, nil)
+		
+		// Log completion
+		requestLogger.Info().Msg("Request completed")
+	}
+}
+#+END_SRC
+
+*** Custom rate limiting implementation
+
+Example of implementing a custom rate limiting strategy:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"net/http"
+	"sync"
+	"time"
+	
+	"github.com/cybrarymin/behavox/api"
+	"golang.org/x/time/rate"
+)
+
+// CustomRateLimiter extends the base rate limiter with additional features
+type CustomRateLimiter struct {
+	// Global rate limiter settings
+	globalLimit       rate.Limit
+	globalBurst       int
+	globalLimiter     *rate.Limiter
+	
+	// Per-client settings
+	clientLimit       rate.Limit
+	clientBurst       int
+	clientExpiration  time.Duration
+	
+	// Per-endpoint settings
+	endpointLimiters  map[string]*rate.Limiter
+	
+	// Client tracking
+	clients           map[string]*ClientInfo
+	mu                sync.RWMutex
+}
+
+// ClientInfo tracks per-client rate limiting information
+type ClientInfo struct {
+	Limiter      *rate.Limiter
+	LastSeen     time.Time
+	EndpointHits map[string]int
+}
+
+// NewCustomRateLimiter creates a new custom rate limiter
+func NewCustomRateLimiter(globalRate, clientRate int, expiration time.Duration) *CustomRateLimiter {
+	// Calculate burst sizes (110% of base rate)
+	globalBurst := globalRate + globalRate/10
+	clientBurst := clientRate + clientRate/10
+	
+	// Create the global limiter
+	globalLimiter := rate.NewLimiter(rate.Limit(globalRate), globalBurst)
+	
+	// Initialize endpoint limiters for critical endpoints
+	endpointLimiters := map[string]*rate.Limiter{
+		"/v1/events":      rate.NewLimiter(rate.Limit(globalRate*0.7), globalBurst),
+		"/v1/events/bulk": rate.NewLimiter(rate.Limit(globalRate*0.3), globalBurst/2),
+	}
+	
+	return &CustomRateLimiter{
+		globalLimit:      rate.Limit(globalRate),
+		globalBurst:      globalBurst,
+		globalLimiter:    globalLimiter,
+		clientLimit:      rate.Limit(clientRate),
+		clientBurst:      clientBurst,
+		clientExpiration: expiration,
+		endpointLimiters: endpointLimiters,
+		clients:          make(map[string]*ClientInfo),
+	}
+}
+
+// RateLimitMiddleware creates a middleware that applies the custom rate limiting
+func (rl *CustomRateLimiter) RateLimitMiddleware(next http.Handler) http.Handler {
+	// Start background cleanup goroutine
+	go rl.cleanupExpiredClients()
+	
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check global rate limit first
+		if !rl.globalLimiter.Allow() {
+			http.Error(w, "Global rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		
+		// Check endpoint-specific rate limit if applicable
+		path := r.URL.Path
+		if limiter, exists := rl.endpointLimiters[path]; exists {
+			if !limiter.Allow() {
+				http.Error(w, "Endpoint rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
+		}
+		
+		// Get client IP
+		clientIP := getClientIP(r)
+		
+		// Check client rate limit
+		rl.mu.Lock()
+		client, exists := rl.clients[clientIP]
+		
+		if !exists {
+			// New client
+			client = &ClientInfo{
+				Limiter:      rate.NewLimiter(rl.clientLimit, rl.clientBurst),
+				LastSeen:     time.Now(),
+				EndpointHits: make(map[string]int),
+			}
+			rl.clients[clientIP] = client
+		} else {
+			// Update existing client
+			client.LastSeen = time.Now()
+		}
+		
+		// Track endpoint hits
+		client.EndpointHits[path]++
+		
+		// Check if client is allowed
+		allow := client.Limiter.Allow()
+		rl.mu.Unlock()
+		
+		if !allow {
+			http.Error(w, "Client rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		
+		// Proceed to next handler
+		next.ServeHTTP(w, r)
+	})
+}
+
+// cleanupExpiredClients removes clients that haven't been seen recently
+func (rl *CustomRateLimiter) cleanupExpiredClients() {
+	ticker := time.NewTicker(rl.clientExpiration / 2)
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		cutoff := time.Now().Add(-rl.clientExpiration)
+		
+		rl.mu.Lock()
+		for ip, client := range rl.clients {
+			if client.LastSeen.Before(cutoff) {
+				delete(rl.clients, ip)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+// getClientIP extracts the client IP from a request
+func getClientIP(r *http.Request) string {
+	// Check for forwarded IP
+	forwardedFor := r.Header.Get("X-Forwarded-For")
+	if forwardedFor != "" {
+		return forwardedFor
+	}
+	
+	// Use RemoteAddr
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
+
+// Usage example
+func main() {
+	// Create custom rate limiter
+	rateLimiter := NewCustomRateLimiter(
+		100,               // Global limit: 100 requests/second
+		10,                // Per-client limit: 10 requests/second
+		30*time.Second,    // Client expiration: 30 seconds
+	)
+	
+	// Create router
+	mux := http.NewServeMux()
+	
+	// Add handlers
+	mux.HandleFunc("/v1/events", func(w http.ResponseWriter, r *http.Request) {
+		// Handle event creation
+	})
+	
+	mux.HandleFunc("/v1/events/bulk", func(w http.ResponseWriter, r *http.Request) {
+		// Handle bulk event creation
+	})
+	
+	// Apply middleware
+	handler := rateLimiter.RateLimitMiddleware(mux)
+	
+	// Start server
+	http.ListenAndServe(":8080", handler)
+}
+#+END_SRC
+
+*** Monitoring request metrics
+
+Example of monitoring request metrics with Prometheus:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"time"
+	
+	"github.com/cybrarymin/behavox/api/observability"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+// RequestMetrics collects and exposes HTTP request metrics
+type RequestMetrics struct {
+	// Request counters
+	totalRequests     *prometheus.CounterVec
+	pathRequests      *prometheus.CounterVec
+	responseStatus    *prometheus.CounterVec
+	
+	// Request duration histogram
+	requestDuration   *prometheus.HistogramVec
+	
+	// Rate limiting metrics
+	rateLimitExceeded *prometheus.CounterVec
+}
+
+// NewRequestMetrics creates and registers metrics
+func NewRequestMetrics(reg prometheus.Registerer) *RequestMetrics {
+	m := &RequestMetrics{
+		totalRequests: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "http",
+				Name:      "requests_total",
+				Help:      "Total number of HTTP requests",
+			},
+			[]string{"method"},
+		),
+		
+		pathRequests: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "http",
+				Name:      "requests_path_total",
+				Help:      "Total number of HTTP requests by path",
+			},
+			[]string{"method", "path"},
+		),
+		
+		responseStatus: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "http",
+				Name:      "response_status_total",
+				Help:      "Total number of responses with specific status code",
+			},
+			[]string{"method", "path", "status"},
+		),
+		
+		requestDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: "http",
+				Name:      "request_duration_seconds",
+				Help:      "HTTP request duration in seconds",
+				Buckets:   []float64{0.001, 0.01, 0.1, 0.5, 1, 2.5, 5, 10},
+			},
+			[]string{"method", "path"},
+		),
+		
+		rateLimitExceeded: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "http",
+				Name:      "rate_limit_exceeded_total",
+				Help:      "Total number of requests that exceeded rate limits",
+			},
+			[]string{"limit_type"}, // "global", "client", "endpoint"
+		),
+	}
+	
+	// Register metrics
+	reg.MustRegister(
+		m.totalRequests,
+		m.pathRequests,
+		m.responseStatus,
+		m.requestDuration,
+		m.rateLimitExceeded,
+	)
+	
+	return m
+}
+
+// MetricsMiddleware creates a middleware that collects request metrics
+func (m *RequestMetrics) MetricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := r.Method
+		path := r.URL.Path
+		
+		// Increment request counters
+		m.totalRequests.WithLabelValues(method).Inc()
+		m.pathRequests.WithLabelValues(method, path).Inc()
+		
+		// Start timer
+		start := time.Now()
+		
+		// Create response wrapper to capture status code
+		wrapper := NewResponseWrapper(w)
+		
+		// Process request
+		next.ServeHTTP(wrapper, r)
+		
+		// Record duration
+		duration := time.Since(start).Seconds()
+		m.requestDuration.WithLabelValues(method, path).Observe(duration)
+		
+		// Record status code
+		status := fmt.Sprintf("%d", wrapper.Status())
+		m.responseStatus.WithLabelValues(method, path, status).Inc()
+		
+		// Check for rate limiting status
+		if wrapper.Status() == http.StatusTooManyRequests {
+			// Determine limit type from custom header
+			limitType := wrapper.Header().Get("X-Rate-Limit-Type")
+			if limitType == "" {
+				limitType = "unknown"
+			}
+			m.rateLimitExceeded.WithLabelValues(limitType).Inc()
+		}
+	})
+}
+
+// ResponseWrapper wraps an http.ResponseWriter to capture the status code
+type ResponseWrapper struct {
+	http.ResponseWriter
+	status int
+}
+
+// NewResponseWrapper creates a new response wrapper
+func NewResponseWrapper(w http.ResponseWriter) *ResponseWrapper {
+	return &ResponseWrapper{
+		ResponseWriter: w,
+		status:         http.StatusOK, // Default status
+	}
+}
+
+// WriteHeader captures the status code
+func (w *ResponseWrapper) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+// Status returns the captured status code
+func (w *ResponseWrapper) Status() int {
+	return w.status
+}
+
+// Usage example
+func main() {
+	// Create registry
+	reg := prometheus.NewRegistry()
+	
+	// Create metrics
+	metrics := NewRequestMetrics(reg)
+	
+	// Create router
+	mux := http.NewServeMux()
+	
+	// Add handlers
+	mux.HandleFunc("/v1/events", func(w http.ResponseWriter, r *http.Request) {
+		// Handle event creation
+		w.WriteHeader(http.StatusCreated)
+	})
+	
+	mux.HandleFunc("/v1/events/bulk", func(w http.ResponseWriter, r *http.Request) {
+		// Simulate rate limiting
+		w.Header().Set("X-Rate-Limit-Type", "endpoint")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	
+	// Add metrics endpoint
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	
+	// Apply middleware
+	handler := metrics.MetricsMiddleware(mux)
+	
+	// Start server
+	http.ListenAndServe(":8080", handler)
 }
 #+END_SRC

@@ -15,9 +15,9 @@ func (api *ApiServer) routes() http.Handler {
 	router.MethodNotAllowed = api.promHandler(api.methodNotAllowedResponse)
 
 	// handle the event
-	router.HandlerFunc(http.MethodPost, "/v1/events", api.promHandler(api.createEventHandler))
+	router.HandlerFunc(http.MethodPost, "/v1/events", api.promHandler(api.JWTAuth(api.createEventHandler)))
 	router.HandlerFunc(http.MethodGet, "/v1/stats", api.promHandler(api.GetEventStatsHandler))
-
+	router.HandlerFunc(http.MethodPost, "/v1/tokens", api.promHandler((api.createJWTTokenHandler)))
 	// Prometheus Handler
 	router.Handler(http.MethodGet, "/metrics", promhttp.Handler())
 

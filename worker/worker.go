@@ -15,11 +15,13 @@ import (
 	data "github.com/cybrarymin/behavox/internal/models"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
 
 var (
-	CmdProcessedEventFile string
+	CmdProcessedEventFile  string
+	CmdmaxWorkerGoroutines int
 )
 
 type Worker struct {
@@ -28,6 +30,7 @@ type Worker struct {
 	EventQueue *data.EventQueue
 	Ctx        context.Context
 	Cancel     context.CancelFunc
+	fileLock   sync.Mutex
 }
 
 func NewWorker(logger *zerolog.Logger, eq *data.EventQueue, ctx context.Context) *Worker {
@@ -41,81 +44,100 @@ func NewWorker(logger *zerolog.Logger, eq *data.EventQueue, ctx context.Context)
 }
 
 func (w *Worker) Run(ctx context.Context) {
+	w.Logger.Info().Msgf("starting the worker process in the background with %d number of threads for processing", CmdmaxWorkerGoroutines)
 
 	runCtx := w.Ctx
-
 	w.wg.Add(1)
 	defer w.wg.Done()
+
+	// make a semaphore pattern to impede having lot's of goroutines
+	semaphore := make(chan struct{}, CmdmaxWorkerGoroutines)
+
 	for {
 		select {
 		case nEvent := <-w.EventQueue.Events:
-			spanCtx, span := otel.Tracer("Worker.Tracer").Start(ctx, "Worker.Span")
-			var EventType string
-			switch nEvent.(type) {
-			case *data.EventLog:
-				EventType = "log"
-			case *data.EventMetric:
-				EventType = "metric"
-			}
+			w.wg.Add(1)
 
-			// Measure queue wait time (time from enqueue to processing)
-			var queueWaitTime float64
-			if baseEvent, ok := nEvent.(*data.EventLog); ok && !baseEvent.BaseEvent.EnqueueTime.IsZero() {
-				queueWaitTime = time.Since(baseEvent.BaseEvent.EnqueueTime).Seconds()
-				observ.PromEventQueueWaitTime.WithLabelValues(EventType).Observe(queueWaitTime)
-			} else if baseEvent, ok := nEvent.(*data.EventMetric); ok && !baseEvent.BaseEvent.EnqueueTime.IsZero() {
-				queueWaitTime = time.Since(baseEvent.BaseEvent.EnqueueTime).Seconds()
-				observ.PromEventQueueWaitTime.WithLabelValues(EventType).Observe(queueWaitTime)
-			}
+			semaphore <- struct{}{} // if the number of goroutines we are running to process each event exceeds 10 this will wait until one goroutine freeUp
+			go func(event data.Event) {
+				defer w.wg.Done()
+				defer func() { <-semaphore }() // read from semaphore
 
-			// Capture the start time for event processing duration
-			eventProcessingStart := time.Now()
-
-			err := processEvent(spanCtx, nEvent)
-			if err != nil {
-				w.Logger.Error().Err(err).
-					Str("event_id", nEvent.GetEventID()).
-					Msg("event processing failed")
-
-				time.Sleep(2 * time.Second) // wait for two second and reprocess the event
-				// Check if context is cancelled before retry
-				select {
-				case <-runCtx.Done():
-					w.Logger.Info().Str("event_id", nEvent.GetEventID()).
-						Msg("skipping processing due to shutdown")
-					observ.PromEventTotalProcessStatus.WithLabelValues("skipped", EventType).Inc()
-					return
-				default:
-
+				spanCtx, span := otel.Tracer("Worker.Tracer").Start(ctx, "Worker.Span")
+				var EventType string
+				switch event.(type) {
+				case *data.EventLog:
+					EventType = "log"
+				case *data.EventMetric:
+					EventType = "metric"
 				}
 
-				// Increment retry counter before retrying
-				observ.PromEventRetryCount.WithLabelValues(EventType).Inc()
+				// Measure queue wait time (time from enqueue to processing)
+				var queueWaitTime float64
+				if baseEvent, ok := event.(*data.EventLog); ok && !baseEvent.BaseEvent.EnqueueTime.IsZero() {
+					queueWaitTime = time.Since(baseEvent.BaseEvent.EnqueueTime).Seconds()
+					observ.PromEventQueueWaitTime.WithLabelValues(EventType).Observe(queueWaitTime)
+				} else if baseEvent, ok := event.(*data.EventMetric); ok && !baseEvent.BaseEvent.EnqueueTime.IsZero() {
+					queueWaitTime = time.Since(baseEvent.BaseEvent.EnqueueTime).Seconds()
+					observ.PromEventQueueWaitTime.WithLabelValues(EventType).Observe(queueWaitTime)
+				}
 
-				err := processEvent(spanCtx, nEvent)
+				// Capture the start time for event processing duration
+				eventProcessingStart := time.Now()
+
+				w.Logger.Info().
+					Str("event_id", event.GetEventID()).
+					Msg("worker started processing the event")
+
+				err := w.processEvent(spanCtx, event)
 				if err != nil {
 					w.Logger.Error().Err(err).
-						Str("event_id", nEvent.GetEventID()).
-						Msg("event processing failed permanently")
+						Str("event_id", event.GetEventID()).
+						Msg("event processing failed")
 
-					span.RecordError(err)
-					span.SetStatus(codes.Error, "event processing failed permanently")
-					// Add to the number of failed processed events metrics
-					observ.PromEventTotalProcessStatus.WithLabelValues("failed", EventType).Inc()
-					observ.PromEventTotalProcessed.WithLabelValues().Inc()
-					span.End()
-					continue
+					time.Sleep(2 * time.Second) // wait for two second and reprocess the event
+					// Check if context is cancelled before retry
+					select {
+					case <-runCtx.Done():
+						w.Logger.Info().Str("event_id", event.GetEventID()).
+							Msg("skipping processing due to shutdown")
+						observ.PromEventTotalProcessStatus.WithLabelValues("skipped", EventType).Inc()
+						return
+					default:
+
+					}
+
+					// Increment retry counter before retrying
+					observ.PromEventRetryCount.WithLabelValues(EventType).Inc()
+
+					err := w.processEvent(spanCtx, event)
+					if err != nil {
+						w.Logger.Error().Err(err).
+							Str("event_id", event.GetEventID()).
+							Msg("event processing failed permanently")
+
+						span.RecordError(err)
+						span.SetStatus(codes.Error, "event processing failed permanently")
+						// Add to the number of failed processed events metrics
+						observ.PromEventTotalProcessStatus.WithLabelValues("failed", EventType).Inc()
+						observ.PromEventTotalProcessed.WithLabelValues().Inc()
+						span.End()
+						return
+					}
 				}
-			}
 
-			// Record the event processing duration
-			processingDuration := time.Since(eventProcessingStart).Seconds()
-			observ.PromEventProcessingDuration.WithLabelValues(EventType).Observe(processingDuration)
+				w.Logger.Info().
+					Str("event_id", event.GetEventID()).
+					Msg("finished processing of the event")
+				// Record the event processing duration
+				processingDuration := time.Since(eventProcessingStart).Seconds()
+				observ.PromEventProcessingDuration.WithLabelValues(EventType).Observe(processingDuration)
 
-			// Add to the number of successful processed events metrics
-			observ.PromEventTotalProcessStatus.WithLabelValues("success", EventType).Inc()
-			observ.PromEventTotalProcessed.WithLabelValues().Inc()
-			span.End()
+				// Add to the number of successful processed events metrics
+				observ.PromEventTotalProcessStatus.WithLabelValues("success", EventType).Inc()
+				observ.PromEventTotalProcessed.WithLabelValues().Inc()
+				span.End()
+			}(nEvent)
 
 		case <-runCtx.Done():
 			w.Logger.Info().Msg("worker run loop exiting due to context cancellation")
@@ -153,14 +175,16 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 /*
 processEvent simulate processing of an event by doing digest calculation
 */
-func processEvent(ctx context.Context, event data.Event) error {
+func (w *Worker) processEvent(ctx context.Context, event data.Event) error {
 	ctx, span := otel.Tracer("Worker.ProcessEvent.Tracer").Start(ctx, "Worker.ProcessEvent.Span")
 	defer span.End()
+	span.SetAttributes(attribute.String("event.id", event.GetEventID()))
 
 	startTime := time.Now()
 
 	eMeta := event.GetMetadata()
-	// serialize the metadata do json format
+
+	// Now serialize the metadata with the updated ThreadID
 	jMeta, err := helpers.MarshalJson(ctx, eMeta)
 	if err != nil {
 		span.RecordError(err)
@@ -174,15 +198,22 @@ func processEvent(ctx context.Context, event data.Event) error {
 	metaHashHex := hex.EncodeToString(hasher.Sum(nil))
 	// calculate the length of the metadata
 	metaLength := len(jMeta)
-	// fetch the thread id of the event
-	metaGoroutineId := helpers.GetGoroutineID(ctx)
 
 	// retrive the amount of time spent on calculating hash and length and goroutine id
 	firstPhaseProcessTime := time.Since(startTime)
 
+	// Get goroutine ID and update the event's ThreadID
+	metaGoroutineId := helpers.GetGoroutineID(ctx)
+
+	if logEvent, ok := event.(*data.EventLog); ok {
+		logEvent.BaseEvent.ThreadID = int(metaGoroutineId)
+	} else if metricEvent, ok := event.(*data.EventMetric); ok {
+		metricEvent.BaseEvent.ThreadID = int(metaGoroutineId)
+	}
+
 	// simulate an additional processing time for the metadata
 	randomTime := 0.05 + rand.Float32()*(0.2-0.05)
-	time.Sleep(time.Duration(randomTime))
+	time.Sleep(5 * time.Second) //TODO TSHOOT
 
 	metaProcessingTime := randomTime + float32(firstPhaseProcessTime.Seconds())
 
@@ -193,17 +224,25 @@ func processEvent(ctx context.Context, event data.Event) error {
 		Event          data.Event
 		Md5            string
 		Length         int
-		GoRoutineID    uint64
 		ProcessingTime string
 		ProcessedAt    time.Time
 	}{
 		Event:          event,
 		Md5:            metaHashHex,
 		Length:         metaLength,
-		GoRoutineID:    metaGoroutineId,
 		ProcessingTime: fmt.Sprintf("%.4f", metaProcessingTime),
 		ProcessedAt:    metaProcessAt,
 	}
+
+	jResult, err := helpers.MarshalJson(ctx, processResult)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to serialize the event metadata to json format")
+		return err
+	}
+
+	w.fileLock.Lock()
+	defer w.fileLock.Unlock()
 
 	file, err := os.OpenFile(CmdProcessedEventFile, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0660)
 	if err != nil {
@@ -213,12 +252,6 @@ func processEvent(ctx context.Context, event data.Event) error {
 	}
 	defer file.Close()
 
-	jResult, err := helpers.MarshalJson(ctx, processResult)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to serialize the event metadata to json format")
-		return err
-	}
 	_, err = file.Write(jResult)
 	if err != nil {
 		span.RecordError(err)
