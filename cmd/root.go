@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/cybrarymin/behavox/api"
-	apiObserv "github.com/cybrarymin/behavox/api/observability"
+	observ "github.com/cybrarymin/behavox/api/observability"
+	data "github.com/cybrarymin/behavox/internal/models"
+	"github.com/cybrarymin/behavox/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -39,10 +41,10 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVar(&api.CmdLogLevelFlag, "log-level", "info", "loglevel. possible values are debug, info, warn, error, fatal, panic, and trace")
 	rootCmd.PersistentFlags().StringVar(&api.CmdHTTPSrvListenAddr, "listen-addr", "https://0.0.0.0:443", "listen address for the http/https service")
-	rootCmd.PersistentFlags().StringVar(&apiObserv.CmdJaegerHostFlag, "jeager-host", "localhost", "Jaeger/jaeger-collector server address for sending opentelemetry traces")
-	rootCmd.PersistentFlags().StringVar(&apiObserv.CmdJaegerPortFlag, "jeager-port", "5317", "Jaeger/jaeger-collector server port for sending opentelemetry traces")
-	rootCmd.PersistentFlags().DurationVar(&apiObserv.CmdJaegerConnectionTimeout, "jeager-conn-timeout", time.Second*5, "connection will fail if it couldn't be established to jaeger host within this time")
-	rootCmd.PersistentFlags().DurationVar(&apiObserv.CmdSpanExportInterval, "jeager-trace-exporter-intervals", time.Second*5, "intervals which tracer batch exporter will send the traces to the jeager")
+	rootCmd.PersistentFlags().StringVar(&observ.CmdJaegerHostFlag, "jeager-host", "localhost", "Jaeger/jaeger-collector server address for sending opentelemetry traces")
+	rootCmd.PersistentFlags().StringVar(&observ.CmdJaegerPortFlag, "jeager-port", "5317", "Jaeger/jaeger-collector server port for sending opentelemetry traces")
+	rootCmd.PersistentFlags().DurationVar(&observ.CmdJaegerConnectionTimeout, "jeager-conn-timeout", time.Second*5, "connection will fail if it couldn't be established to jaeger host within this time")
+	rootCmd.PersistentFlags().DurationVar(&observ.CmdSpanExportInterval, "jeager-trace-exporter-intervals", time.Second*5, "intervals which tracer batch exporter will send the traces to the jeager")
 	rootCmd.Flags().DurationVar(&api.CmdHTTPSrvWriteTimeout, "srv-write-timeout", 3*time.Second, "http server response write timeout")
 	rootCmd.Flags().DurationVar(&api.CmdHTTPSrvReadTimeout, "srv-read-timeout", 3*time.Second, "http server response write timeout")
 	rootCmd.Flags().DurationVar(&api.CmdHTTPSrvIdleTimeout, "srv-idle-timeout", 1*time.Minute, "http server idle timeout")
@@ -51,5 +53,7 @@ func init() {
 	rootCmd.Flags().Int64Var(&api.CmdGlobalRateLimit, "global-request-rate-limit", 25, "used to apply rate limiting to total number of requests coming to the api server. 10% of the specified value will be considered as the burst limit for total number of requests")
 	rootCmd.Flags().Int64Var(&api.CmdPerClientRateLimit, "per-client-rate-limit", 2, "used to apply rate limiting to per client number of requests coming to the api server. 10% of the specified value will be considered as the burst limit for total number of requests")
 	rootCmd.Flags().BoolVar(&api.CmdEnableRateLimit, "enable-rate-limit", false, "enable rate limiting")
+	rootCmd.Flags().Int64Var(&data.CmdEventQueueSize, "event-queue-size", 100, "event queue size")
+	rootCmd.Flags().StringVar(&worker.CmdProcessedEventFile, "event-processor-file", "/tmp/events.json", "file path for the worker to persist the logs processing information in json format")
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }

@@ -16,7 +16,7 @@ func (api *ApiServer) routes() http.Handler {
 
 	// handle the event
 	router.HandlerFunc(http.MethodPost, "/v1/events", api.promHandler(api.createEventHandler))
-	router.HandlerFunc(http.MethodGet, "/v1/events/stats", api.promHandler(api.GetEventStatsHandler))
+	router.HandlerFunc(http.MethodGet, "/v1/stats", api.promHandler(api.GetEventStatsHandler))
 
 	// Prometheus Handler
 	router.Handler(http.MethodGet, "/metrics", promhttp.Handler())

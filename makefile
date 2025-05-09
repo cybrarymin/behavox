@@ -50,7 +50,13 @@ run/api:
 	@if [ -f /tmp/cert.pem ] && [ -f /tmp/key.pem ]; then \
 		openssl req -x509 -newkey rsa:4096 -keyout /tmp/key.pem -out /tmp/cert.pem -sha256 -days 3650 -nodes -subj "/C=CA/ST=ON/L=Toronto/O=Behavox/OU=Devops/CN=*.behavox.com" 1>&2 2>/dev/null; \
 		fi;
-	@go run main.go --log-level=${LOGLVL} --listen-addr ${LISTEN_ADDR} --cert /tmp/cert.pem --cert-key /tmp/key.pem --enable-rate-limit=true
+	@go run -race main.go  \
+	--log-level=${LOGLVL} \
+	--listen-addr ${LISTEN_ADDR} \
+	--cert /tmp/cert.pem  \
+	--cert-key /tmp/key.pem \
+	--enable-rate-limit=true \
+	--event-queue-size=100 
 
 #================================================================#
 # QUALITY CHECK , LINTING, Vendoring

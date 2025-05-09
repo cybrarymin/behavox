@@ -27,7 +27,7 @@ processors:
    error_mode: ignore
    traces:
      span:
-       - IsMatch(attributes["user_agent.original"], "Prometheus*")
+       - IsMatch(attributes["http.target"], "/metrics*")
 
   
   # attribute processor will read attributes of metrics,traces,logs and change them based on your needs
@@ -54,7 +54,7 @@ processors:
 
 exporters:
   debug:
-    verbosity: detailed
+    verbosity: detailed # enable debug exporter to show events and problems when there is an exporter issue
   # Jaeger exporter
   otlphttp/jaeger:
     endpoint: http://jaeger:4318
@@ -84,7 +84,7 @@ extensions:
 service:
   telemetry:
     logs:
-      level: debug
+      level: debug # enable detailed logging for investigating filters
   extensions: [health_check, pprof, zpages]
   pipelines:
     traces:

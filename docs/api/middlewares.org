@@ -115,14 +115,14 @@ func (api *ApiServer) otelHandler(next http.Handler) http.HandlerFunc {
   - Uses `httpsnoop` to capture metrics without interfering with the response
   #+BEGIN_SRC go
 func (api *ApiServer) promHandler(next http.HandlerFunc, path string) http.HandlerFunc {
-	apiObserv.PromApplicationVersion.WithLabelValues(Version).Set(1)
+	observ.PromApplicationVersion.WithLabelValues(Version).Set(1)
 	return func(w http.ResponseWriter, r *http.Request) {
-		apiObserv.PromHttpTotalRequests.WithLabelValues().Inc()
-		pTimer := prometheus.NewTimer(apiObserv.PromHttpDuration.WithLabelValues(path))
+		observ.PromHttpTotalRequests.WithLabelValues().Inc()
+		pTimer := prometheus.NewTimer(observ.PromHttpDuration.WithLabelValues(path))
 		defer pTimer.ObserveDuration()
 		snoopMetrics := httpsnoop.CaptureMetrics(next, w, r)
-		apiObserv.PromHttpTotalResponse.WithLabelValues().Inc()
-		apiObserv.PromHttpResponseStatus.WithLabelValues(path, strconv.Itoa(snoopMetrics.Code)).Inc()
+		observ.PromHttpTotalResponse.WithLabelValues().Inc()
+		observ.PromHttpResponseStatus.WithLabelValues(path, strconv.Itoa(snoopMetrics.Code)).Inc()
 	}
 }
   #+END_SRC
@@ -321,11 +321,11 @@ func initOtel(serviceName string) (*sdktrace.TracerProvider, error) {
 // Initialize Prometheus metrics
 func initPrometheus() {
     // Register metrics with Prometheus
-    prometheus.MustRegister(apiObserv.PromApplicationVersion)
-    prometheus.MustRegister(apiObserv.PromHttpTotalRequests)
-    prometheus.MustRegister(apiObserv.PromHttpDuration)
-    prometheus.MustRegister(apiObserv.PromHttpTotalResponse)
-    prometheus.MustRegister(apiObserv.PromHttpResponseStatus)
+    prometheus.MustRegister(observ.PromApplicationVersion)
+    prometheus.MustRegister(observ.PromHttpTotalRequests)
+    prometheus.MustRegister(observ.PromHttpDuration)
+    prometheus.MustRegister(observ.PromHttpTotalResponse)
+    prometheus.MustRegister(observ.PromHttpResponseStatus)
     
     // Create Prometheus metrics endpoint
     http.Handle("/metrics", promhttp.Handler())

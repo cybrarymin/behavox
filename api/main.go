@@ -11,8 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	apiObserv "github.com/cybrarymin/behavox/api/observability"
+	observ "github.com/cybrarymin/behavox/api/observability"
 	helpers "github.com/cybrarymin/behavox/internal"
+	data "github.com/cybrarymin/behavox/internal/models"
+	"github.com/cybrarymin/behavox/worker"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/pkgerrors"
 )
@@ -44,14 +46,24 @@ func Main() {
 	ctx := context.Background()
 
 	// initialize opentelemetry
-	otelShut, err := apiObserv.SetupOTelSDK(ctx, apiObserv.CmdJaegerHostFlag, apiObserv.CmdJaegerPortFlag, apiObserv.CmdJaegerConnectionTimeout, apiObserv.CmdSpanExportInterval)
+	otelShut, err := observ.SetupOTelSDK(ctx, observ.CmdJaegerHostFlag, observ.CmdJaegerPortFlag, observ.CmdJaegerConnectionTimeout, observ.CmdSpanExportInterval)
 	if err != nil {
 		nlogger.Error().Err(err).Msg("failed to initialize the opentelemetry sdk")
 		return
 	}
 
+	// initialize the models so apiServer can have access to the models and eventQueue system
+	eq := data.NewEventQueue()
+	nModel := data.NewModels(eq, nil, nil)
+
+	// initialize and run worker node
+	nWorker := worker.NewWorker(&nlogger, eq, ctx)
+	helpers.BackgroundJob(func() {
+		nWorker.Run(ctx)
+	}, &nlogger, "new worker paniced during consuming events")
+
 	// initialize the prometheus
-	apiObserv.PromInit()
+	observ.PromInit(eq, Version)
 
 	// initializing new validator to be used for input validation of cmdOptions
 	nVal := helpers.NewValidator()
@@ -79,7 +91,7 @@ func Main() {
 		return
 	}
 
-	nApi := NewApiServer(nApiCfg, &nlogger)
+	nApi := NewApiServer(nApiCfg, &nlogger, nModel)
 	nSrv := http.Server{
 		Addr:         nApi.Cfg.ListenAddr.Host,
 		Handler:      nApi.routes(),
@@ -90,7 +102,7 @@ func Main() {
 	}
 
 	shutdownChan := make(chan error)
-	go nApi.gracefulShutdown(nApi.Logger, shutdownChan, nSrv.Shutdown, otelShut)
+	go gracefulShutdown(nApi, &nlogger, shutdownChan, nSrv.Shutdown, nWorker.Shutdown, otelShut)
 
 	if nApi.Cfg.ListenAddr.Scheme == "https" {
 		nlogger.Info().Msgf("starting the server on %s over %s", nApi.Cfg.ListenAddr.Host, nApi.Cfg.ListenAddr.Scheme)
@@ -115,7 +127,7 @@ func Main() {
 }
 
 // gracefulShitdown catches the terminate, quit, interrupt signals and closes the connection gracefully
-func (api *ApiServer) gracefulShutdown(logger *zerolog.Logger, shutdownChan chan error, shutdownFuncs ...func(context.Context) error) {
+func gracefulShutdown(api *ApiServer, logger *zerolog.Logger, shutdownChan chan error, shutdownFuncs ...func(context.Context) error) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
 	s := <-sigChan
@@ -137,6 +149,7 @@ func (api *ApiServer) gracefulShutdown(logger *zerolog.Logger, shutdownChan chan
 	// waiting for the background tasks to finish
 	logger.Info().Msg("waiting for background tasks to finish")
 	api.Wg.Wait()
+
 	shutdownChan <- nil
 
 	logger.Info().Msg("stopped the server")

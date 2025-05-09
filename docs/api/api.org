@@ -7,14 +7,17 @@
 - [[#concepts-and-purpose][Concepts and purpose]]
   - [[#api-server-configuration][API server configuration]]
   - [[#request-context-management][Request context management]]
+  - [[#event-handling-integration][Event handling integration]]
 - [[#design-and-implementation][Design and implementation]]
   - [[#api-server-configuration-structure][API server configuration structure]]
   - [[#api-server-structure][API server structure]]
   - [[#configuration-validation][Configuration validation]]
   - [[#request-context-handling][Request context handling]]
+  - [[#models-integration][Models integration]]
 - [[#usage-examples][Usage examples]]
   - [[#creating-and-configuring-the-api-server][Creating and configuring the API server]]
   - [[#handling-request-context][Handling request context]]
+  - [[#working-with-events][Working with events]]
   - [[#complete-server-initialization][Complete server initialization]]
 :END:
 
@@ -36,6 +39,15 @@
   - Correlation :: Linking logs, metrics, and traces to specific requests
   - Observability :: Enhanced monitoring and troubleshooting capabilities
   The request ID is a UUID generated for each incoming request and made available to all handlers and middleware in the request processing chain.
+
+*** Event handling integration
+
+- Event processing :: The API server integrates with an event processing system that:
+  - Provides access to event queue :: Through the Models structure
+  - Enables event publishing :: Allowing HTTP handlers to queue events for processing
+  - Promotes decoupling :: HTTP request handling is decoupled from event processing
+  - Supports asynchronous operations :: Long-running tasks can be processed outside the request-response cycle
+  This integration enables a more scalable and resilient architecture for handling operations that don't need to be completed within the HTTP request lifecycle.
 
 ** Design and implementation
 
@@ -98,21 +110,24 @@ func NewApiServerCfg(listenAddr *url.URL, tlsCertFile string, tlsKeyFile string,
   | ~Logger *zerolog.Logger~ | Structured logger for recording server events |
   | ~Wg sync.WaitGroup~     | Wait group for coordinating goroutines |
   | ~mu sync.RWMutex~       | Read-write mutex for thread-safe operations |
+  | ~models *data.Models~   | Reference to data models including event queue |
   #+BEGIN_SRC go
 type ApiServer struct {
 	Cfg    *ApiServerCfg
 	Logger *zerolog.Logger
 	Wg     sync.WaitGroup
 	mu     sync.RWMutex
+	models *data.Models
 }
   #+END_SRC
 
-- Server factory :: The `NewApiServer` function creates a new `ApiServer` instance with the given configuration and logger
+- Server factory :: The `NewApiServer` function creates a new `ApiServer` instance with the given configuration, logger, and models
   #+BEGIN_SRC go
-func NewApiServer(cfg *ApiServerCfg, logger *zerolog.Logger) *ApiServer {
+func NewApiServer(cfg *ApiServerCfg, logger *zerolog.Logger, models *data.Models) *ApiServer {
 	return &ApiServer{
 		Cfg:    cfg,
 		Logger: logger,
+		models: models,
 	}
 }
   #+END_SRC
@@ -163,6 +178,36 @@ func (api *ApiServer) getReqIDContext(r *http.Request) string {
 }
   #+END_SRC
 
+*** Models integration
+
+- Models access :: The API server provides access to data models and event queue
+  - Models structure containing the event queue
+  - API handlers can access models to enqueue events
+  - Promotes separation of concerns between request handling and event processing
+  #+BEGIN_SRC go
+// Example of a handler using the models to enqueue an event
+func (api *ApiServer) createEventHandler(w http.ResponseWriter, r *http.Request) {
+	// Create a new event
+	event := data.NewEventLog(
+		uuid.New().String(),
+		"info",
+		"Event created via API",
+	)
+	
+	// Enqueue the event for processing
+	err := api.models.EventQueue.PutEvent(r.Context(), event)
+	if err != nil {
+		// Handle error (e.g., queue full)
+		http.Error(w, "Failed to queue event", http.StatusServiceUnavailable)
+		return
+	}
+	
+	// Respond with success
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte(`{"status":"event queued for processing"}`))
+}
+  #+END_SRC
+
 ** Usage examples
 
 *** Creating and configuring the API server
@@ -178,6 +223,7 @@ import (
     "time"
     
     "github.com/cybrarymin/behavox/api"
+    "github.com/cybrarymin/behavox/internal/models"
     "github.com/rs/zerolog"
 )
 
@@ -201,8 +247,12 @@ func main() {
         time.Second*10,             // Write timeout
     )
     
+    // Create event queue and models
+    eventQueue := models.NewEventQueue()
+    appModels := models.NewModels(eventQueue, nil, nil)
+    
     // Create the API server
-    server := api.NewApiServer(cfg, &logger)
+    server := api.NewApiServer(cfg, &logger, appModels)
     
     // Server is now ready for route configuration and startup
 }
@@ -247,15 +297,98 @@ func main() {
 }
 #+END_SRC
 
+*** Working with events
+
+Example of creating and processing events:
+
+#+BEGIN_SRC go
+package main
+
+import (
+    "net/http"
+    "context"
+    
+    "github.com/cybrarymin/behavox/api"
+    "github.com/cybrarymin/behavox/internal/models"
+    "github.com/google/uuid"
+)
+
+func registerEventHandlers(server *api.ApiServer) {
+    // Handler for creating log events
+    http.HandleFunc("/api/events/log", func(w http.ResponseWriter, r *http.Request) {
+        // Parse request parameters
+        level := r.URL.Query().Get("level")
+        message := r.URL.Query().Get("message")
+        
+        if level == "" || message == "" {
+            http.Error(w, "Missing required parameters", http.StatusBadRequest)
+            return
+        }
+        
+        // Create log event
+        logEvent := models.NewEventLog(
+            uuid.New().String(),
+            level,
+            message,
+        )
+        
+        // Add event to queue
+        err := server.models.EventQueue.PutEvent(r.Context(), logEvent)
+        if err != nil {
+            http.Error(w, "Failed to queue event: "+err.Error(), http.StatusInternalServerError)
+            return
+        }
+        
+        // Respond with success
+        w.Header().Set("Content-Type", "application/json")
+        w.Write([]byte(`{"status":"success","message":"Event queued for processing"}`))
+    })
+    
+    // Handler for creating metric events
+    http.HandleFunc("/api/events/metric", func(w http.ResponseWriter, r *http.Request) {
+        // Parse value parameter
+        valueStr := r.URL.Query().Get("value")
+        if valueStr == "" {
+            http.Error(w, "Missing value parameter", http.StatusBadRequest)
+            return
+        }
+        
+        value, err := strconv.ParseFloat(valueStr, 64)
+        if err != nil {
+            http.Error(w, "Invalid value format", http.StatusBadRequest)
+            return
+        }
+        
+        // Create metric event
+        metricEvent := models.NewEventMetric(
+            uuid.New().String(),
+            value,
+        )
+        
+        // Add event to queue
+        err = server.models.EventQueue.PutEvent(r.Context(), metricEvent)
+        if err != nil {
+            http.Error(w, "Failed to queue event: "+err.Error(), http.StatusInternalServerError)
+            return
+        }
+        
+        // Respond with success
+        w.Header().Set("Content-Type", "application/json")
+        w.Write([]byte(`{"status":"success","message":"Metric event queued for processing"}`))
+    })
+}
+#+END_SRC
+
 *** Complete server initialization
 
-Complete example of initializing and starting the server:
+Example of a complete server initialization with event processing:
 
 #+BEGIN_SRC go
 package main
 
 import (
     "context"
+    "log"
     "net/http"
     "net/url"
     "os"
@@ -264,17 +397,36 @@ import (
     "time"
     
     "github.com/cybrarymin/behavox/api"
+    "github.com/cybrarymin/behavox/api/observability"
+    "github.com/cybrarymin/behavox/internal/models"
+    "github.com/cybrarymin/behavox/worker"
     "github.com/rs/zerolog"
 )
 
 func main() {
-    // Create a logger
+    // Initialize context
+    ctx := context.Background()
+    
+    // Initialize logger
     logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
     
-    // Parse the listen address
-    listenURL, _ := url.Parse("http://localhost:8080")
+    // Create event queue
+    models.CmdEventQueueSize = 100
+    eventQueue := models.NewEventQueue()
+    appModels := models.NewModels(eventQueue, nil, nil)
     
-    // Create the API server configuration
+    // Initialize worker
+    worker.CmdProcessedEventFile = "processed_events.json"
+    workerInstance := worker.NewWorker(&logger, eventQueue, ctx)
+    
+    // Start worker in background
+    go workerInstance.Run(ctx)
+    
+    // Initialize observability
+    observ.PromInit(eventQueue, "1.0.0")
+    
+    // Create server configuration
+    listenURL, _ := url.Parse("http://localhost:8080")
     cfg := api.NewApiServerCfg(
         listenURL,
         "",
@@ -287,60 +439,48 @@ func main() {
         time.Second*10,
     )
     
-    // Create the API server
-    server := api.NewApiServer(cfg, &logger)
+    // Create API server
+    server := api.NewApiServer(cfg, &logger, appModels)
     
     // Configure HTTP server
     httpServer := &http.Server{
         Addr:         cfg.ListenAddr.Host,
+        Handler:      server.routes(),
         ReadTimeout:  cfg.ServerReadTimeout,
         WriteTimeout: cfg.ServerWriteTimeout,
         IdleTimeout:  cfg.ServerIdleTimeout,
     }
     
-    // Register handlers
-    http.Handle("/api/example", server.setContextHandler(
-        server.panicRecovery(
-            server.rateLimit(
-                server.otelHandler(
-                    http.HandlerFunc(
-                        server.promHandler(exampleHandler, "/api/example")
-                    )
-                )
-            )
-        )
-    ))
-    
-    // Start the server in a goroutine
+    // Start HTTP server
     go func() {
-        server.Logger.Info().
-            Str("addr", cfg.ListenAddr.String()).
-            Msg("Starting API server")
-            
+        logger.Info().Str("addr", httpServer.Addr).Msg("Starting HTTP server")
         if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            server.Logger.Fatal().Err(err).Msg("Server failed to start")
+            logger.Fatal().Err(err).Msg("HTTP server error")
         }
     }()
     
-    // Wait for interrupt signal to gracefully shut down the server
-    quit := make(chan os.Signal, 1)
-    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-    <-quit
+    // Wait for shutdown signal
+    stop := make(chan os.Signal, 1)
+    signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+    <-stop
     
-    // Create a deadline for server shutdown
-    ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+    // Graceful shutdown
+    logger.Info().Msg("Shutting down server...")
+    
+    // Create shutdown context with timeout
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
     defer cancel()
     
-    // Attempt graceful shutdown
-    server.Logger.Info().Msg("Shutting down server...")
-    if err := httpServer.Shutdown(ctx); err != nil {
-        server.Logger.Fatal().Err(err).Msg("Server forced to shutdown")
+    // Shutdown HTTP server
+    if err := httpServer.Shutdown(shutdownCtx); err != nil {
+        logger.Fatal().Err(err).Msg("Server shutdown failed")
     }
     
-    server.Logger.Info().Msg("Server exited gracefully")
-}
-
-func exampleHandler(w http.ResponseWriter, r *http.Request) {
-    w.Write([]byte("Hello, world!"))
+    // Shutdown worker
+    if err := workerInstance.Shutdown(shutdownCtx); err != nil {
+        logger.Fatal().Err(err).Msg("Worker shutdown failed")
+    }
+    
+    logger.Info().Msg("Server exited properly")
 }
 #+END_SRC

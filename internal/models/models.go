@@ -1,5 +1,11 @@
 package data
 
 type Models struct {
-	Events EventModel
+	EventQueue *EventQueue
+}
+
+func NewModels(eq *EventQueue, em *EventMetric, el *EventLog) *Models {
+	return &Models{
+		EventQueue: eq,
+	}
 }

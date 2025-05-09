@@ -7,14 +7,20 @@
 - [[#concepts-and-purpose][Concepts and purpose]]
   - [[#json-request-and-response-handling][JSON request and response handling]]
   - [[#opentelemetry-integration][OpenTelemetry integration]]
+  - [[#background-task-management][Background task management]]
 - [[#design-and-implementation][Design and implementation]]
   - [[#envelope-type][Envelope type]]
   - [[#json-response-writer][JSON response writer]]
   - [[#json-request-reader][JSON request reader]]
+  - [[#json-marshaling-and-unmarshaling][JSON marshaling and unmarshaling]]
+  - [[#goroutine-identification][Goroutine identification]]
+  - [[#background-job-execution][Background job execution]]
   - [[#error-handling-for-json-parsing][Error handling for JSON parsing]]
 - [[#usage-examples][Usage examples]]
   - [[#writing-json-responses][Writing JSON responses]]
   - [[#reading-json-requests][Reading JSON requests]]
+  - [[#working-with-raw-json-data][Working with raw JSON data]]
+  - [[#running-background-tasks][Running background tasks]]
   - [[#error-handling-in-handlers][Error handling in handlers]]
 :END:
 
@@ -39,6 +45,15 @@
   - Debugging context :: Provide context for troubleshooting JSON parsing issues
   This integration ensures that all JSON operations are properly traced and monitored, making it easier to diagnose issues in production.
 
+*** Background task management
+
+- Background task execution :: The helpers include a function for safely running background tasks:
+  - Panic recovery :: Automatically catches and logs panics in background goroutines
+  - Logging integration :: Reports errors to the application logger
+  - Simplified concurrency :: Makes it easier to start background jobs without boilerplate
+  - Improved reliability :: Prevents goroutine panics from crashing the application
+  This functionality helps maintain application stability by properly managing background operations.
+
 ** Design and implementation
 
 *** Envelope type
@@ -62,7 +77,7 @@ type Envelope map[string]interface{}
   #+BEGIN_SRC go
 // WriteJson will write the data as response with desired http header and http status code
 func WriteJson(ctx context.Context, w http.ResponseWriter, status int, data Envelope, headers http.Header) error {
-	_, span := otel.Tracer("ReadJson.Tracer").Start(ctx, "ReadJson.Span")
+	_, span := otel.Tracer("WriteJson.Tracer").Start(ctx, "WriteJson.Span")
 	defer span.End()
 
 	// considering bytes.Buffer instead of directly writing to the http.responseWriter to be able to segregate the error handling for json marshaling and write errors
@@ -73,18 +88,23 @@ func WriteJson(ctx context.Context, w http.ResponseWriter, status int, data Enve
 		span.SetStatus(codes.Error, "failed to serialize data into json format")
 		return err
 	}
+	span.SetAttributes(attribute.Int("encoded_bytes", nBuffer.Len()))
 
 	for key, value := range headers {
 		w.Header()[key] = value
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	span.SetAttributes(attribute.Int("status_code", status))
+
 	_, err = w.Write(nBuffer.Bytes())
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to write json data as a response")
 		return err
 	}
+
+	span.SetStatus(codes.Ok, "successfully wrote response")
 	return nil
 }
   #+END_SRC
@@ -102,8 +122,8 @@ func WriteJson(ctx context.Context, w http.ResponseWriter, status int, data Enve
 func ReadJson[T any](ctx context.Context, w http.ResponseWriter, r *http.Request) (T, error) {
 	_, span := otel.Tracer("ReadJson.Tracer").Start(ctx, "ReadJson.Span")
 	defer span.End()
-
 	var output, zero T
+
 	// Limit the amount of bytes accepted as post request body
 	maxBytes := 1_048_576 // _ here is only for visual separator purpose and for int values go's compiler will ignore it.
 	r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
@@ -113,11 +133,107 @@ func ReadJson[T any](ctx context.Context, w http.ResponseWriter, r *http.Request
 	// field which cannot be mapped to the target destination, the decoder will return
 	// an error instead of just ignoring the field.
 	dec.DisallowUnknownFields()
-	err := dec.Decode(&output)
+	span.SetAttributes(attribute.Bool("disallow_unknown_fields", true))
+	span.SetAttributes(attribute.Int64("max_bytes", int64(maxBytes)))
 	
-	// Error handling code omitted for brevity
+	// Decode and error handling omitted for brevity
+	// ...
 	
 	return output, nil
+}
+  #+END_SRC
+
+*** JSON marshaling and unmarshaling
+
+- MarshalJson function :: Serializes Go values to JSON bytes
+  - Creates a span for OpenTelemetry tracing
+  - Uses a buffer for efficient encoding
+  - Records encoded size in span attributes
+  - Returns the serialized bytes and any error encountered
+  #+BEGIN_SRC go
+// MarshalJson get's the input of anytype then serialize it in json
+func MarshalJson(ctx context.Context, data interface{}) ([]byte, error) {
+	_, span := otel.Tracer("MarshalJson.Tracer").Start(ctx, "MarshalJson.Span")
+	defer span.End()
+
+	// considering bytes.Buffer instead of directly writing to the http.responseWriter to be able to segregate the error handling for json marshaling and write errors
+	nBuffer := bytes.Buffer{}
+	err := json.NewEncoder(&nBuffer).Encode(data)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to serialize data into json format")
+		return nil, err
+	}
+	span.SetAttributes(attribute.Int("encoded_bytes", nBuffer.Len()))
+
+	return nBuffer.Bytes(), nil
+}
+  #+END_SRC
+
+- UnmarshalJson function :: Deserializes JSON bytes to typed Go values
+  - Uses generics for type-safe parsing
+  - Creates a span for OpenTelemetry tracing
+  - Records the target type in span attributes on error
+  - Returns the parsed value and any error encountered
+  #+BEGIN_SRC go
+// UnmarshalJson will deserialize data to the specified type
+func UnmarshalJson[T any](ctx context.Context, jdata []byte) (*T, error) {
+	var output T
+	_, span := otel.Tracer("UnmarshalJson.Tracer").Start(ctx, "UnmarshalJson.Span")
+	defer span.End()
+
+	inputReader := bytes.NewReader(jdata)
+	err := json.NewDecoder(inputReader).Decode(&output)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to deserialize jsondata to the specified type")
+		span.SetAttributes(attribute.String("data_type", fmt.Sprintf("%T", output)))
+		return nil, err
+	}
+	return &output, nil
+}
+  #+END_SRC
+
+*** Goroutine identification
+
+- GetGoroutineID function :: Retrieves the ID of the current goroutine
+  - Creates a span for OpenTelemetry tracing
+  - Captures stack trace information
+  - Parses the goroutine ID from the stack
+  - Returns the ID as a uint64 value
+  #+BEGIN_SRC go
+// GetGoroutineID returns the ID of the current goroutine
+func GetGoroutineID(ctx context.Context) uint64 {
+	_, span := otel.Tracer("GetGoroutineID.Tracer").Start(ctx, "GetGoroutineID.Span")
+	defer span.End()
+
+	b := make([]byte, 64)
+	b = b[:runtime.Stack(b, false)] // putting all to false to only get the stack trace of that single goroutine instead of all goroutines
+	b = b[:bytes.IndexByte(b, ' ')]
+	n, _ := strconv.ParseUint(string(b), 10, 64)
+	return n
+}
+  #+END_SRC
+
+*** Background job execution
+
+- BackgroundJob function :: Runs a function in a background goroutine with panic recovery
+  - Launches the provided function in a separate goroutine
+  - Sets up a deferred panic handler to catch any panics
+  - Logs any panics with the provided error message
+  - Includes stack trace information in the error log
+  #+BEGIN_SRC go
+// BackgroundJob runs a function in a background goroutine with panic recovery
+func BackgroundJob(fn func(), logger *zerolog.Logger, panicErrMsg string) {
+	go func() {
+		defer func() {
+			if panicErr := recover(); panicErr != nil {
+				pErr := errors.New(fmt.Sprintln(panicErr))
+				logger.Error().Stack().Err(pErr).Msg(panicErrMsg)
+			}
+		}()
+		fn()
+	}()
 }
   #+END_SRC
 
@@ -149,61 +265,8 @@ if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to read the json body")
 		return zero, err
-
-	// This will happen if we try to unmarshal a json value of a type to a struct field that doesn't support that specific type
-	case errors.As(err, &unmarshalTypeError):
-		if unmarshalTypeError.Field != "" {
-			err = fmt.Errorf("invalid type used for the key %s", unmarshalTypeError.Field)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to read the json body")
-			return zero, err
-		}
-		// if client provide completely different type of json. for example instead of json of object type it sends an array content json
-		err = fmt.Errorf("body contains incorrect JSON type (at character %d)", unmarshalTypeError.Offset)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to read the json body")
-		return zero, err
-
-	// If the JSON contains a field which cannot be mapped to the target destination
-	// then Decode() will now return an error message in the format "json: unknown
-	// field "<name>"". We check for this, extract the field name from the error,
-	// and interpolate it into our custom error message.
-	case strings.HasPrefix(err.Error(), "json: unknown field"):
-		fieldName := strings.TrimPrefix(err.Error(), "json: unknown field")
-		err = fmt.Errorf("body contains unknown field %s", fieldName)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to read the json body")
-		return zero, err
-
-	// If the request body exceeds 1MB in size the decode will now fail with the
-	// error "http: request body too large". There is an open issue about turning
-	// this into a distinct error type at https://github.com/golang/go/issues/30715.
-	case err.Error() == "http: request body too large":
-		err = fmt.Errorf("body must not be larger than %d bytes", maxBytes)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to read the json body")
-		return zero, err
-
-	// Error will happen if we pass invalid type to json.Decode function. we should always pass a pointer otherwise it will give us error
-	case errors.As(err, &invalidUnmarshalError):
-		panic(err)
-	case errors.Is(err, io.EOF):
-		err = errors.New("json body must not be empty")
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to read the json body")
-		return zero, err
-	default:
-		return zero, err
+	// ...other error cases omitted for brevity
 	}
-}
-
-// Check for multiple JSON values
-err = dec.Decode(&struct{}{})
-if err != io.EOF {
-	err = errors.New("body must only contain a single json value")
-	span.RecordError(err)
-	span.SetStatus(codes.Error, "failed to read the json body")
-	return zero, err
 }
   #+END_SRC
 
@@ -254,98 +317,171 @@ Example of reading and validating a JSON request:
 
 #+BEGIN_SRC go
 func createUserHandler(w http.ResponseWriter, r *http.Request) {
-    // Define the expected request structure
-    type UserInput struct {
+    // Define the input structure
+    var input struct {
         Name     string `json:"name"`
         Email    string `json:"email"`
         Password string `json:"password"`
     }
     
-    // Read and parse the JSON request
-    input, err := helpers.ReadJson[UserInput](r.Context(), w, r)
+    // Read and parse the JSON request body
+    input, err := helpers.ReadJson[struct {
+        Name     string `json:"name"`
+        Email    string `json:"email"`
+        Password string `json:"password"`
+    }](r.Context(), w, r)
+    
     if err != nil {
-        // The error is already well-formatted by ReadJson
+        // The ReadJson function will return appropriate error messages
+        // that can be sent directly to the client
         badRequestResponse(w, r, err)
         return
     }
     
     // Validate the input
-    validator := helpers.NewValidator()
+    validator := validators.NewValidator()
     validator.Check(input.Name != "", "name", "must be provided")
     validator.Check(input.Email != "", "email", "must be provided")
-    validator.Check(len(input.Password) >= 8, "password", "must be at least 8 characters")
+    validator.Check(input.Password != "", "password", "must be provided")
     
     if !validator.Valid() {
-        failedValidationResponse(w, r, validator.Errors)
+        // Return validation errors
+        validationErrorResponse(w, r, validator.Errors)
         return
     }
     
-    // Process the valid input and create a response
-    user := User{
-        ID:    uuid.New().String(),
-        Name:  input.Name,
-        Email: input.Email,
-    }
+    // Process the valid input...
+}
+#+END_SRC
+
+*** Working with raw JSON data
+
+Example of working with raw JSON data:
+
+#+BEGIN_SRC go
+func processData(ctx context.Context, data map[string]interface{}) ([]byte, error) {
+    // Add a timestamp to the data
+    data["processed_at"] = time.Now()
     
-    // Create a response with the new user
-    err = helpers.WriteJson(r.Context(), w, http.StatusCreated, helpers.Envelope{"user": user}, nil)
+    // Convert the data to JSON
+    jsonBytes, err := helpers.MarshalJson(ctx, data)
     if err != nil {
-        serverErrorResponse(w, r, err)
-        return
+        return nil, fmt.Errorf("error serializing data: %w", err)
     }
+    
+    // Do something with the JSON bytes...
+    
+    // Now parse it back to a specific type
+    type ProcessedData struct {
+        ID          string    `json:"id"`
+        Name        string    `json:"name"`
+        ProcessedAt time.Time `json:"processed_at"`
+    }
+    
+    processedData, err := helpers.UnmarshalJson[ProcessedData](ctx, jsonBytes)
+    if err != nil {
+        return nil, fmt.Errorf("error parsing processed data: %w", err)
+    }
+    
+    // Use the typed data...
+    fmt.Printf("Processed %s at %v\n", processedData.Name, processedData.ProcessedAt)
+    
+    return jsonBytes, nil
+}
+#+END_SRC
+
+*** Running background tasks
+
+Example of running tasks in the background with panic recovery:
+
+#+BEGIN_SRC go
+func startBackgroundTasks(logger *zerolog.Logger) {
+    // Start a periodic cleanup task
+    helpers.BackgroundJob(func() {
+        for {
+            // Perform cleanup operations
+            cleanupOldData()
+            
+            // Sleep for a while
+            time.Sleep(1 * time.Hour)
+        }
+    }, logger, "periodic cleanup task panicked")
+    
+    // Start a background processing job
+    helpers.BackgroundJob(func() {
+        processQueuedItems()
+    }, logger, "queue processing task panicked")
+    
+    // Start a task that could potentially panic
+    helpers.BackgroundJob(func() {
+        // This will be caught by the panic handler
+        dangerousOperation()
+    }, logger, "dangerous operation panicked")
+}
+
+func cleanupOldData() {
+    // Implementation of cleanup logic
+}
+
+func processQueuedItems() {
+    // Implementation of queue processing
+}
+
+func dangerousOperation() {
+    // This might panic, but won't crash the application
+    items := []string{}
+    fmt.Println(items[99]) // This will panic with index out of range
 }
 #+END_SRC
 
 *** Error handling in handlers
 
-Example of handling errors in a handler using the helpers:
+Example of error handling in a complete handler:
 
 #+BEGIN_SRC go
-func updateUserHandler(w http.ResponseWriter, r *http.Request) {
-    // Define the expected request structure
-    type UpdateInput struct {
-        Name  *string `json:"name"`
-        Email *string `json:"email"`
+func createItemHandler(w http.ResponseWriter, r *http.Request) {
+    // Parse the JSON request body
+    var input struct {
+        Name        string  `json:"name"`
+        Description string  `json:"description"`
+        Price       float64 `json:"price"`
     }
     
-    // Get user ID from path
-    userID := r.PathValue("id")
+    input, err := helpers.ReadJson[struct {
+        Name        string  `json:"name"`
+        Description string  `json:"description"`
+        Price       float64 `json:"price"`
+    }](r.Context(), w, r)
     
-    // Read and parse the JSON request
-    input, err := helpers.ReadJson[UpdateInput](r.Context(), w, r)
     if err != nil {
+        // Send appropriate error response based on the type of error
         switch {
         case strings.Contains(err.Error(), "body contains unknown field"):
-            // Handle unknown field errors specifically
-            errorMessage := fmt.Sprintf("%s. Valid fields are: name, email", err.Error())
-            badRequestResponse(w, r, errors.New(errorMessage))
+            // Unknown field error
+            badRequestResponse(w, r, err)
         case strings.Contains(err.Error(), "body must not be larger than"):
-            // Handle oversized requests specifically
-            tooLargeResponse(w, r, err)
+            // Request too large
+            requestTooLargeResponse(w, r, err)
         default:
-            // Handle other JSON parsing errors
+            // Other JSON parsing errors
             badRequestResponse(w, r, err)
         }
         return
     }
     
-    // Process the update request
-    
-    // Return a success response
-    response := helpers.Envelope{
-        "message": "User updated successfully",
-        "user_id": userID,
+    // Process the input and generate a response
+    item := Item{
+        ID:          uuid.New().String(),
+        Name:        input.Name,
+        Description: input.Description,
+        Price:       input.Price,
+        CreatedAt:   time.Now(),
     }
     
-    err = helpers.WriteJson(r.Context(), w, http.StatusOK, response, nil)
+    // Send success response
+    err = helpers.WriteJson(r.Context(), w, http.StatusCreated, helpers.Envelope{"item": item}, nil)
     if err != nil {
         serverErrorResponse(w, r, err)
-        return
     }
-}
-
-// Custom error response for oversized requests
-func tooLargeResponse(w http.ResponseWriter, r *http.Request, err error) {
-    errorResponse(w, r, http.StatusRequestEntityTooLarge, err.Error())
 }
 #+END_SRC

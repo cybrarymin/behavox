@@ -1,4 +1,4 @@
-package apiObserv
+package observ
 
 import (
 	"context"

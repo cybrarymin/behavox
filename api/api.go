@@ -8,6 +8,7 @@ import (
 	"time"
 
 	helpers "github.com/cybrarymin/behavox/internal"
+	data "github.com/cybrarymin/behavox/internal/models"
 	"github.com/rs/zerolog"
 )
 
@@ -66,11 +67,13 @@ type ApiServer struct {
 	Logger *zerolog.Logger
 	Wg     sync.WaitGroup
 	mu     sync.RWMutex
+	models *data.Models
 }
 
-func NewApiServer(cfg *ApiServerCfg, logger *zerolog.Logger) *ApiServer {
+func NewApiServer(cfg *ApiServerCfg, logger *zerolog.Logger, models *data.Models) *ApiServer {
 	return &ApiServer{
 		Cfg:    cfg,
 		Logger: logger,
+		models: models,
 	}
 }

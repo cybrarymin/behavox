@@ -1,0 +1,320 @@
+* Event Queue
+:PROPERTIES:
+:TOC: :include descendants
+:END:
+
+:CONTENTS:
+- [[#concepts-and-purpose][Concepts and purpose]]
+  - [[#event-buffering-and-asynchronous-processing][Event buffering and asynchronous processing]]
+  - [[#queue-management][Queue management]]
+  - [[#metrics-and-observability][Metrics and observability]]
+- [[#design-and-implementation][Design and implementation]]
+  - [[#event-queue-structure][Event queue structure]]
+  - [[#queue-creation-and-initialization][Queue creation and initialization]]
+  - [[#adding-events-to-the-queue][Adding events to the queue]]
+  - [[#removing-events-from-the-queue][Removing events from the queue]]
+  - [[#queue-size-monitoring][Queue size monitoring]]
+- [[#usage-examples][Usage examples]]
+  - [[#creating-an-event-queue][Creating an event queue]]
+  - [[#adding-different-event-types][Adding different event types]]
+  - [[#consuming-events-from-the-queue][Consuming events from the queue]]
+  - [[#monitoring-queue-metrics][Monitoring queue metrics]]
+:END:
+
+** Concepts and purpose
+
+*** Event buffering and asynchronous processing
+
+- Event buffering :: The event queue provides a buffer between event producers and consumers with:
+  - Decoupling :: Event producers and consumers operate independently
+  - Backpressure handling :: Queue capacity limits protect against overwhelming consumers
+  - Ordered processing :: Events are processed in a first-in, first-out (FIFO) order
+  - Non-blocking producers :: Producers can quickly submit events without waiting for processing
+  This buffering enables a more resilient and scalable system architecture.
+
+*** Queue management
+
+- Queue management :: The event queue provides a controlled approach to event flow with:
+  - Capacity control :: Configurable maximum capacity to prevent memory exhaustion
+  - Thread-safety :: Concurrent access from multiple goroutines
+  - Monitoring :: Size tracking for observability
+  - Graceful handling :: Error responses when the queue is full
+  These management features ensure stable operation under varying load conditions.
+
+*** Metrics and observability
+
+- Queue metrics :: The event queue exposes metrics for monitoring:
+  - Queue capacity :: Maximum number of events that can be held
+  - Current size :: Number of events currently in the queue
+  - Wait time :: Time events spend in the queue before processing
+  These metrics enable monitoring of queue health and performance.
+
+** Design and implementation
+
+*** Event queue structure
+
+- EventQueue struct :: Encapsulates the queue state and behavior
+  | ~Capacity int64~         | Maximum number of events the queue can hold |
+  | ~mu sync.RWMutex~        | Mutex for thread-safe operations |
+  | ~Events chan Event~      | Channel-based queue for events |
+  #+BEGIN_SRC go
+type EventQueue struct {
+	Capacity int64
+	mu       sync.RWMutex
+	Events   chan Event
+}
+  #+END_SRC
+
+*** Queue creation and initialization
+
+- Queue factory :: The `NewEventQueue` function creates a new queue instance
+  - Uses a configurable queue size from command-line settings
+  - Initializes a buffered channel with the specified capacity
+  - Sets up the EventQueue struct with appropriate initial values
+  #+BEGIN_SRC go
+func NewEventQueue() *EventQueue {
+	eq := make(chan Event, CmdEventQueueSize)
+	return &EventQueue{
+		Capacity: int64(CmdEventQueueSize),
+		Events:   eq,
+	}
+}
+  #+END_SRC
+
+*** Adding events to the queue
+
+- PutEvent method :: Adds an event to the queue
+  - Creates a span for OpenTelemetry tracing
+  - Checks if the queue is full before attempting to add
+  - Sets the event's enqueue time for wait time tracking
+  - Returns an error if the queue is at capacity
+  #+BEGIN_SRC go
+func (eq *EventQueue) PutEvent(ctx context.Context, event Event) error {
+	_, span := otel.Tracer("EventQueue.PutEvent.Tracer").Start(ctx, "EventQueue.PutEvent.Span")
+	defer span.End()
+
+	if len(eq.Events) == cap(eq.Events) {
+		return errors.New("event queue is full")
+	}
+	
+	// Set the enqueue time if the event implements BaseEvent
+	if baseEvent, ok := event.(*EventLog); ok {
+		baseEvent.BaseEvent.EnqueueTime = time.Now()
+	} else if baseEvent, ok := event.(*EventMetric); ok {
+		baseEvent.BaseEvent.EnqueueTime = time.Now()
+	}
+	
+	// Append to the Queue
+	eq.Events <- event
+	return nil
+}
+  #+END_SRC
+
+*** Removing events from the queue
+
+- GetEvent method :: Removes and returns an event from the queue
+  - Checks if the queue is empty before attempting to remove
+  - Creates a span for OpenTelemetry tracing
+  - Returns nil if the queue is empty
+  - Removes and returns the first event in the queue
+  #+BEGIN_SRC go
+func (eq *EventQueue) GetEvent(ctx context.Context) Event {
+	// Check if the queue is empty
+	if len(eq.Events) == 0 {
+		return nil
+	}
+	_, span := otel.Tracer("EventQueue.GetEvent.Tracer").Start(ctx, "EventQueue.GetEvent.Span")
+	defer span.End()
+	span.AddEvent("Event removed from queue")
+	return <-eq.Events
+}
+  #+END_SRC
+
+*** Queue size monitoring
+
+- Size method :: Returns the current number of events in the queue
+  - Creates a span for OpenTelemetry tracing
+  - Returns the length of the channel as the queue size
+  #+BEGIN_SRC go
+func (eq *EventQueue) Size(ctx context.Context) int {
+	_, span := otel.Tracer("EventQueue.Size.Tracer").Start(ctx, "EventQueue.Size.Span")
+	defer span.End()
+	return len(eq.Events)
+}
+  #+END_SRC
+
+** Usage examples
+
+*** Creating an event queue
+
+Example of creating an event queue:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	
+	"github.com/cybrarymin/behavox/api/observability"
+	"github.com/cybrarymin/behavox/internal/models"
+)
+
+func main() {
+	// Set the queue size from environment variable or use default
+	queueSize := os.Getenv("EVENT_QUEUE_SIZE")
+	if queueSize != "" {
+		size, err := strconv.ParseInt(queueSize, 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid queue size: %v", err)
+		}
+		models.CmdEventQueueSize = size
+	} else {
+		models.CmdEventQueueSize = 100 // Default size
+	}
+	
+	// Create the event queue
+	eventQueue := models.NewEventQueue()
+	
+	// Initialize Prometheus metrics
+	observ.PromInit(eventQueue, "1.0.0")
+	
+	// Queue is now ready for use
+	log.Printf("Event queue created with capacity: %d", eventQueue.Capacity)
+}
+#+END_SRC
+
+*** Adding different event types
+
+Example of adding different event types to the queue:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"context"
+	"fmt"
+	
+	"github.com/cybrarymin/behavox/internal/models"
+)
+
+func addEventsToQueue(ctx context.Context, queue *models.EventQueue) error {
+	// Create a log event
+	logEvent := models.NewEventLog("log-123", "info", "User login successful")
+	
+	// Add log event to queue
+	err := queue.PutEvent(ctx, logEvent)
+	if err != nil {
+		return fmt.Errorf("failed to add log event: %w", err)
+	}
+	
+	// Create a metric event
+	metricEvent := models.NewEventMetric("metric-456", 95.5)
+	
+	// Add metric event to queue
+	err = queue.PutEvent(ctx, metricEvent)
+	if err != nil {
+		return fmt.Errorf("failed to add metric event: %w", err)
+	}
+	
+	return nil
+}
+#+END_SRC
+
+*** Consuming events from the queue
+
+Example of consuming events from the queue:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+	
+	"github.com/cybrarymin/behavox/internal/models"
+)
+
+func consumeEvents(ctx context.Context, queue *models.EventQueue, processFn func(models.Event) error) {
+	for {
+		select {
+		case <-ctx.Done():
+			// Context cancelled, stop consuming
+			fmt.Println("Event consumer shutting down")
+			return
+		default:
+			// Try to get an event
+			event := queue.GetEvent(ctx)
+			if event == nil {
+				// Queue is empty, wait before trying again
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			
+			// Process the event
+			err := processFn(event)
+			if err != nil {
+				fmt.Printf("Error processing event %s: %v\n", event.GetEventID(), err)
+			}
+		}
+	}
+}
+
+// Example processing function
+func processEvent(event models.Event) error {
+	// Type assertion to handle different event types
+	switch e := event.(type) {
+	case *models.EventLog:
+		fmt.Printf("Processing log event: %s - %s\n", e.Level, e.Message)
+	case *models.EventMetric:
+		fmt.Printf("Processing metric event: %.2f\n", e.Value)
+	default:
+		return fmt.Errorf("unknown event type: %T", event)
+	}
+	return nil
+}
+#+END_SRC
+
+*** Monitoring queue metrics
+
+Example of monitoring queue metrics:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	
+	"github.com/cybrarymin/behavox/api/observability"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+func setupQueueMonitoring() {
+	// Prometheus metrics server
+	http.Handle("/metrics", promhttp.Handler())
+	go func() {
+		fmt.Println("Starting metrics server on :2112")
+		http.ListenAndServe(":2112", nil)
+	}()
+	
+	// Sample Prometheus queries for monitoring queue metrics:
+	//
+	// - Current queue size:
+	//   queue_current_size
+	//
+	// - Queue capacity:
+	//   queue_total_capacity
+	//
+	// - Queue utilization percentage:
+	//   (queue_current_size / queue_total_capacity) * 100
+	//
+	// - Average queue wait time:
+	//   rate(queue_wait_time_seconds_sum[5m]) / rate(queue_wait_time_seconds_count[5m])
+	//
+	// - Wait time by event type:
+	//   rate(queue_wait_time_seconds_sum{event_type="log"}[5m]) / rate(queue_wait_time_seconds_count{event_type="log"}[5m])
+}
+#+END_SRC 

@@ -59,6 +59,11 @@ func (api *ApiServer) rateLimitExceedResponse(w http.ResponseWriter, r *http.Req
 	api.errorResponse(w, r, http.StatusTooManyRequests, message)
 }
 
+func (api *ApiServer) eventQueueFullResponse(w http.ResponseWriter, r *http.Request) {
+	message := "service unavailable, event queue is already full"
+	api.errorResponse(w, r, http.StatusServiceUnavailable, message)
+}
+
 func (api *ApiServer) invalidAuthenticationCredResponse(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("WWW-Authenticate", "Bearer Jwt")
 	message := "invalid authentication creds or token"

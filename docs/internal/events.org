@@ -1,0 +1,362 @@
+* Events
+:PROPERTIES:
+:TOC: :include descendants
+:END:
+
+:CONTENTS:
+- [[#concepts-and-purpose][Concepts and purpose]]
+  - [[#event-interface][Event interface]]
+  - [[#event-types][Event types]]
+  - [[#event-metadata][Event metadata]]
+  - [[#queue-wait-time-tracking][Queue wait time tracking]]
+- [[#design-and-implementation][Design and implementation]]
+  - [[#event-interface-definition][Event interface definition]]
+  - [[#base-event-structure][Base event structure]]
+  - [[#event-metric-structure][Event metric structure]]
+  - [[#event-log-structure][Event log structure]]
+- [[#usage-examples][Usage examples]]
+  - [[#creating-events][Creating events]]
+  - [[#working-with-event-metadata][Working with event metadata]]
+  - [[#extracting-event-information][Extracting event information]]
+  - [[#type-detection-and-handling][Type detection and handling]]
+:END:
+
+** Concepts and purpose
+
+*** Event interface
+
+- Event interface :: The Event interface defines the common behavior for all event types:
+  - Metadata access :: Retrieving event-specific metadata
+  - Common metadata :: Accessing standard metadata present on all events
+  - Identification :: Getting the unique identifier for an event
+  This interface enables generic handling of different event types while maintaining type safety.
+
+*** Event types
+
+- Event types :: The system supports multiple event types for different use cases:
+  - Log events :: For recording messages with severity levels
+  - Metric events :: For capturing numerical measurements
+  - Extensibility :: Interface design allows for adding new event types
+  These event types cover common monitoring and observability requirements while allowing for future expansion.
+
+*** Event metadata
+
+- Event metadata :: Each event carries metadata that provides context:
+  - Event ID :: Unique identifier for the event
+  - Timestamp :: When the event was created
+  - Thread ID :: The thread or goroutine that created the event
+  - Type-specific fields :: Additional data relevant to each event type
+  Metadata enables proper identification, sorting, and analysis of events.
+
+*** Queue wait time tracking
+
+- Wait time tracking :: Events track when they enter the queue to measure processing delays:
+  - Enqueue timestamp :: Time when the event was added to the queue
+  - Processing timestamp :: Time when processing started
+  - Wait time calculation :: Difference between enqueue and processing time
+  This tracking helps identify performance bottlenecks in the event processing pipeline.
+
+** Design and implementation
+
+*** Event interface definition
+
+- Event interface :: Defines common methods for all event types
+  - Provides access to event metadata, common properties, and event ID
+  - Enables polymorphic handling of different event types
+  - Facilitates generic processing logic that works with any event type
+  #+BEGIN_SRC go
+type Event interface {
+	GetMetadata() map[string]interface{}
+	GetCommonMetadata() map[string]interface{}
+	GetEventID() string
+}
+  #+END_SRC
+
+*** Base event structure
+
+- BaseEvent struct :: Implements common event functionality
+  - Contains fields shared by all event types
+  - Includes event ID, timestamp, thread ID, and enqueue time
+  - Used as an embedded struct in specific event types
+  #+BEGIN_SRC go
+type BaseEvent struct {
+	EventID     string
+	Timestamp   string
+	ThreadID    int
+	EnqueueTime time.Time // Time when the event was added to the queue
+}
+
+func NewBaseEvent(eventID string) *BaseEvent {
+	return &BaseEvent{
+		EventID:     eventID,
+		Timestamp:   time.Now().Format("2006-01-02 15:04:05"),
+		ThreadID:    0,
+		EnqueueTime: time.Time{}, // Will be set when added to queue
+	}
+}
+
+func (b BaseEvent) GetEventID() string {
+	return b.EventID
+}
+
+func (b BaseEvent) GetCommonMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		"event_id":   b.EventID,
+		"timestamp":  b.Timestamp,
+		"thread_id":  b.ThreadID,
+		"event_type": fmt.Sprintf("%T", b),
+	}
+}
+  #+END_SRC
+
+*** Event metric structure
+
+- EventMetric struct :: Represents a metric event
+  - Embeds BaseEvent for common functionality
+  - Adds a Value field for the metric value
+  - Implements the Event interface
+  #+BEGIN_SRC go
+type EventMetric struct {
+	*BaseEvent
+	Value float64
+}
+
+func NewEventMetric(eventID string, value float64) *EventMetric {
+	return &EventMetric{
+		BaseEvent: NewBaseEvent(eventID),
+		Value:     value,
+	}
+}
+
+func (e EventMetric) GetMetadata() map[string]interface{} {
+	metadata := e.GetCommonMetadata()
+	metadata["value"] = e.Value
+	return metadata
+}
+  #+END_SRC
+
+*** Event log structure
+
+- EventLog struct :: Represents a log event
+  - Embeds BaseEvent for common functionality
+  - Adds Level and Message fields for log details
+  - Implements the Event interface
+  #+BEGIN_SRC go
+type EventLog struct {
+	*BaseEvent
+	Level   string
+	Message string
+}
+
+func NewEventLog(eventID string, level string, message string) *EventLog {
+	return &EventLog{
+		BaseEvent: NewBaseEvent(eventID),
+		Level:     level,
+		Message:   message,
+	}
+}
+
+func (e EventLog) GetMetadata() map[string]interface{} {
+	metadata := e.GetCommonMetadata()
+	metadata["level"] = e.Level
+	metadata["message"] = e.Message
+	return metadata
+}
+  #+END_SRC
+
+** Usage examples
+
+*** Creating events
+
+Example of creating different event types:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"fmt"
+	
+	"github.com/cybrarymin/behavox/internal/models"
+)
+
+func createEvents() {
+	// Create a log event
+	logEvent := models.NewEventLog(
+		"log-123",         // Event ID
+		"error",           // Log level
+		"Connection failed" // Log message
+	)
+	
+	// Create a metric event
+	metricEvent := models.NewEventMetric(
+		"metric-456",      // Event ID
+		98.6               // Metric value
+	)
+	
+	fmt.Printf("Created log event with ID: %s\n", logEvent.GetEventID())
+	fmt.Printf("Created metric event with ID: %s\n", metricEvent.GetEventID())
+}
+#+END_SRC
+
+*** Working with event metadata
+
+Example of working with event metadata:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	
+	"github.com/cybrarymin/behavox/internal/models"
+)
+
+func displayEventMetadata() {
+	// Create a log event
+	logEvent := models.NewEventLog(
+		"log-789",
+		"warning",
+		"Disk space low"
+	)
+	
+	// Get and display the common metadata
+	commonMeta := logEvent.GetCommonMetadata()
+	fmt.Println("Common metadata:")
+	for key, value := range commonMeta {
+		fmt.Printf("  %s: %v\n", key, value)
+	}
+	
+	// Get and display the full metadata
+	fullMeta := logEvent.GetMetadata()
+	fmt.Println("\nFull metadata:")
+	for key, value := range fullMeta {
+		fmt.Printf("  %s: %v\n", key, value)
+	}
+	
+	// Serialize the metadata to JSON
+	jsonData, _ := json.MarshalIndent(fullMeta, "", "  ")
+	fmt.Println("\nJSON representation:")
+	fmt.Println(string(jsonData))
+}
+#+END_SRC
+
+*** Extracting event information
+
+Example of extracting information from events:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"fmt"
+	"time"
+	
+	"github.com/cybrarymin/behavox/internal/models"
+)
+
+func extractEventInfo(event models.Event) {
+	// Get the event ID
+	eventID := event.GetEventID()
+	fmt.Printf("Processing event: %s\n", eventID)
+	
+	// Extract information based on event type
+	switch e := event.(type) {
+	case *models.EventLog:
+		fmt.Printf("Log event [%s]: %s - %s\n", 
+			eventID, e.Level, e.Message)
+			
+		// Check if it's a high-priority log
+		if e.Level == "error" || e.Level == "critical" {
+			fmt.Println("High-priority log detected!")
+		}
+		
+	case *models.EventMetric:
+		fmt.Printf("Metric event [%s]: %.2f\n", 
+			eventID, e.Value)
+			
+		// Check if the metric exceeds a threshold
+		if e.Value > 90 {
+			fmt.Println("Metric value exceeds threshold!")
+		}
+	}
+	
+	// Get the timestamp and parse it
+	metadata := event.GetMetadata()
+	timestamp, ok := metadata["timestamp"].(string)
+	if ok {
+		// Parse the timestamp string
+		t, err := time.Parse("2006-01-02 15:04:05", timestamp)
+		if err == nil {
+			fmt.Printf("Event created at: %s\n", t.Format(time.RFC1123))
+		}
+	}
+}
+#+END_SRC
+
+*** Type detection and handling
+
+Example of detecting and handling different event types:
+
+#+BEGIN_SRC go
+package main
+
+import (
+	"fmt"
+	
+	"github.com/cybrarymin/behavox/internal/models"
+)
+
+func processEvents(events []models.Event) {
+	// Statistics counters
+	var logCount, metricCount, errorLogCount int
+	var metricSum float64
+	
+	// Process each event
+	for _, event := range events {
+		// Use type detection to handle different event types
+		switch e := event.(type) {
+		case *models.EventLog:
+			logCount++
+			
+			// Count error logs
+			if e.Level == "error" {
+				errorLogCount++
+				fmt.Printf("Error log: %s\n", e.Message)
+			}
+			
+		case *models.EventMetric:
+			metricCount++
+			metricSum += e.Value
+			
+		default:
+			fmt.Printf("Unknown event type: %T\n", event)
+		}
+	}
+	
+	// Calculate statistics
+	fmt.Printf("Processed %d events\n", len(events))
+	fmt.Printf("Log events: %d (errors: %d)\n", logCount, errorLogCount)
+	
+	if metricCount > 0 {
+		avgMetric := metricSum / float64(metricCount)
+		fmt.Printf("Metric events: %d (avg value: %.2f)\n", metricCount, avgMetric)
+	} else {
+		fmt.Printf("Metric events: 0\n")
+	}
+}
+
+func main() {
+	// Create a mixed slice of events
+	events := []models.Event{
+		models.NewEventLog("log-1", "info", "System started"),
+		models.NewEventMetric("metric-1", 75.5),
+		models.NewEventLog("log-2", "error", "Database connection failed"),
+		models.NewEventMetric("metric-2", 92.3),
+		models.NewEventLog("log-3", "warning", "Low memory"),
+	}
+	
+	// Process the events
+	processEvents(events)
+}
+#+END_SRC 
