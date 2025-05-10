@@ -45,10 +45,12 @@ This event queue system is only for **demo purpose**, showing code implementatio
   - Configurable limits and burst allowances
 
 - **Observability**
-  - OpenTelemetry distributed tracing
-  - Prometheus metrics for monitoring
-  - Jaeger integration for trace visualization
-  - Grafana dashboards for metrics visualization
+These containers are defined in deployments folder compose.yaml. each has it's own configuration and set of yaml files.
+  - Otel-Collector for trace pipelines and exporting
+  - Prometheus metrics for monitoring ( port 9090 )
+  - Jaeger integration for trace visualization ( dashboard port 16686 )
+  - Grafana dashboards for metrics visualization ( port 3000 )
+  - ReDoc for Api Documentation ( port 9596 )
 
 - **Graceful Shutdown**
   - Proper resource cleanup on termination
@@ -68,7 +70,9 @@ This event queue system is only for **demo purpose**, showing code implementatio
 1. Clone the repository:
    ```bash
    git@github.com:kdask/behavox-tech-task-cybrarymin.git
-   cd behavox-tech-task-cybrarymin
+   $ cd behavox-tech-task-cybrarymin/deployments/
+   $ docker compose  up -d
+   $ cd ../
    ```
 
 2. Build the application:

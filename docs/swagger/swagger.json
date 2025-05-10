@@ -1,0 +1,356 @@
+{
+  "swagger": "2.0",
+  "host": "127.0.0.1:80", 
+  "info": {
+    "title": "Event Queue API",
+    "description": "API for creating events, retrieving queue statistics, and generating authentication tokens",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Ryan",
+      "url": "https://github.com/cybrarymin",
+      "email": "aminmoghaddam1377@gmail.com"
+    }
+  },
+  "basePath": "/v1",
+  "schemes": [
+    "http",
+    "https"
+  ],
+  "paths": {
+    "/events": {
+      "post": {
+        "summary": "Create a new event",
+        "description": "Create a new event (log or metric) and add it to the event queue",
+        "tags": [
+          "events"
+        ],
+        "consumes": [
+          "application/json"
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "parameters": [
+          {
+            "in": "body",
+            "name": "event",
+            "description": "Event data",
+            "required": true,
+            "schema": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/MetricEventCreateReq"
+                },
+                {
+                  "$ref": "#/definitions/LogEventCreateReq"
+                }
+              ]
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "type": "string",
+            "required": true,
+            "description": "JWT token (format \"Bearer {token}\")"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event successfully created and added to queue",
+            "schema": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/MetricEventCreateRes"
+                },
+                {
+                  "$ref": "#/definitions/LogEventCreateRes"
+                }
+              ]
+            }
+          },
+          "400": {
+            "description": "Invalid request format or missing required fields",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid token",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "422": {
+            "description": "Unprocessable entity - validation failed",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "429": {
+            "description": "Too many requests - rate limit exceeded",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "503": {
+            "description": "Service unavailable - event queue is full",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "/stats": {
+      "get": {
+        "summary": "Get event queue statistics",
+        "description": "Retrieve current size of the event queue",
+        "tags": [
+          "events"
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successfully retrieved queue statistics",
+            "schema": {
+              "$ref": "#/definitions/EventStatsGetRes"
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "/tokens": {
+      "post": {
+        "summary": "Generate authentication token",
+        "description": "Generate a JWT token for API authentication",
+        "tags": [
+          "authentication"
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "type": "string",
+            "required": true,
+            "description": "Basic authentication credentials (Format \"Basic b64of(username:password)\")"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successfully generated token",
+            "schema": {
+              "$ref": "#/definitions/TokenCreateRes"
+            }
+          },
+          "401": {
+            "description": "Unauthorized - invalid credentials",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "MetricEventCreateReq": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": "object",
+          "required": [
+            "event_type",
+            "event_id",
+            "value"
+          ],
+          "properties": {
+            "event_type": {
+              "type": "string",
+              "enum": [
+                "metric"
+              ],
+              "example": "metric"
+            },
+            "event_id": {
+              "type": "string",
+              "format": "uuid",
+              "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+            },
+            "value": {
+              "type": "number",
+              "format": "float",
+              "example": 95.8
+            }
+          }
+        }
+      },
+      "required": [
+        "event"
+      ]
+    },
+    "LogEventCreateReq": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": "object",
+          "required": [
+            "event_type",
+            "event_id",
+            "level",
+            "message"
+          ],
+          "properties": {
+            "event_type": {
+              "type": "string",
+              "enum": [
+                "log"
+              ],
+              "example": "log"
+            },
+            "event_id": {
+              "type": "string",
+              "format": "uuid",
+              "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+            },
+            "level": {
+              "type": "string",
+              "example": "error"
+            },
+            "message": {
+              "type": "string",
+              "example": "Database connection failed"
+            }
+          }
+        }
+      },
+      "required": [
+        "event"
+      ]
+    },
+    "MetricEventCreateRes": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": "object",
+          "properties": {
+            "event_type": {
+              "type": "string",
+              "enum": [
+                "metric"
+              ],
+              "example": "metric"
+            },
+            "event_id": {
+              "type": "string",
+              "format": "uuid",
+              "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+            },
+            "value": {
+              "type": "number",
+              "format": "float",
+              "example": 95.8
+            }
+          }
+        }
+      }
+    },
+    "LogEventCreateRes": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": "object",
+          "properties": {
+            "event_type": {
+              "type": "string",
+              "enum": [
+                "log"
+              ],
+              "example": "log"
+            },
+            "event_id": {
+              "type": "string",
+              "format": "uuid",
+              "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+            },
+            "level": {
+              "type": "string",
+              "example": "error"
+            },
+            "message": {
+              "type": "string",
+              "example": "Database connection failed"
+            }
+          }
+        }
+      }
+    },
+    "EventStatsGetRes": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "type": "object",
+          "properties": {
+            "queue_size": {
+              "type": "integer",
+              "format": "int64",
+              "example": 42
+            }
+          }
+        }
+      }
+    },
+    "TokenCreateRes": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "type": "object",
+          "properties": {
+            "token": {
+              "type": "string",
+              "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImJlaGF2b3gtYWRtaW5AYmVoYXZveC5jb20iLCJpc3MiOiJiZWhhdm94LmV4YW1wbGUuY29tIiwic3ViIjoiYmVoYXZveC1hZG1pbiIsImF1ZCI6WyJiZWhhdm94LmV4YW1wbGUuY29tIl0sImV4cCI6MTcxNTcwNDAwMCwibmJmIjoxNzE1NDQ0ODAwLCJpYXQiOjE3MTU0NDQ4MDAsImp0aSI6ImYxMjM0NTY3LTg5YWItMTIzNC01Njc4LWFiY2RlZjEyMzQ1NiJ9.SIG"
+            }
+          }
+        }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Error information, can be a string message or structured validation errors"
+        },
+        "request_id": {
+          "type": "string",
+          "description": "Unique ID for the request",
+          "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        }
+      }
+    }
+  }
+}

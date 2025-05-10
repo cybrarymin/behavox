@@ -157,7 +157,7 @@ func (api *ApiServer) createEventHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	nRes := NewEventCreateRes(nReq.Event.EventType, nReq.Event.EventID, nReq.Event.Value, nReq.Event.Level, nReq.Event.Message)
-	err = helpers.WriteJson(ctx, w, http.StatusOK, helpers.Envelope{"event": nRes}, nil)
+	err = helpers.WriteJson(ctx, w, http.StatusCreated, helpers.Envelope{"event": nRes}, nil)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to write the response for the client")

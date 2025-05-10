@@ -170,6 +170,9 @@ func (api *ApiServer) rateLimit(next http.Handler) http.Handler {
 	}
 }
 
+/*
+JWTAuth will get the jwt token and verifies it
+*/
 func (api *ApiServer) JWTAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("JwtAuth.Tracer").Start(r.Context(), "JwtAuth.Span")
@@ -225,4 +228,16 @@ func (api *ApiServer) JWTAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		next.ServeHTTP(w, r)
 	}
+}
+
+/*
+enableCORS is going add corss origin resource sharing required headers
+*/
+func (api *ApiServer) enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Api_Key, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTION, HEAD")
+		next.ServeHTTP(w, r)
+	})
 }

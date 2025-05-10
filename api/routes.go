@@ -22,5 +22,9 @@ func (api *ApiServer) routes() http.Handler {
 	router.Handler(http.MethodGet, "/metrics", promhttp.Handler())
 
 	// Otel http instrumentation
-	return api.panicRecovery(api.setContextHandler(api.otelHandler(api.rateLimit(router))))
+	return api.panicRecovery(
+		api.setContextHandler(
+			api.enableCORS(
+				(api.otelHandler(
+					api.rateLimit(router))))))
 }
