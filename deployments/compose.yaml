@@ -1,13 +1,14 @@
 version: "2.4"
 services:
-  swagger-ui:
-    image: swaggerapi/swagger-ui:v5.17.14
+  
+  redoc:
+    image: redocly/redoc:latest
     environment:
-      SWAGGER_JSON: /oas/swagger.json
+      SPEC_URL: /oas/swagger.json
     ports:
-      - "9595:8080"
+      - "9596:80"
     volumes:
-      - ../../docs:/oas
+      - ../docs/swagger:/usr/share/nginx/html/oas
   
   otel-collector:
     image: otel/opentelemetry-collector:0.118.0
