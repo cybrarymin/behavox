@@ -208,7 +208,7 @@ DOCKER_REGISTRY_USERNAME
 DOCKER_REGISTRY_PASS
 
 envs:
-DOCKER_IMAGE_NAME
+DOCKER_IMAGE_NAME which will be the repo name. the image will <repo-name>:<tag>
 
 
 
