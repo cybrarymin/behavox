@@ -1,4 +1,4 @@
-name: buidling and pushing exporter image
+name: buidling and pushing event-queue image
 
 on:
   push:
@@ -69,12 +69,12 @@ jobs:
           go-version: 1.24.2
 
       - name: Build the Golang Application
-        run: make build/exporter/dockerImage DOCKER_IMAGENAME="${{ vars.DOCKER_IMAGE_NAME }}"
+        run: make build/api/dockerImage DOCKER_IMAGENAME="${{ vars.DOCKER_IMAGE_NAME }}"
 
       - name: Log in to docker registry
         run: docker login -u $DOCKER_REGISTRY_USERNAME -p $DOCKER_REGISTRY_PASS
 
       - name: Tag and Push Docker Image
         run: |
-          IMAGE_TAG=`docker image ls | grep -i polkaexporter | awk 'BEGIN{FS=" "}{print$2}'`
+          IMAGE_TAG=`docker image ls | grep -i ${{ vars.DOCKER_IMAGE_NAME }} | awk 'BEGIN{FS=" "}{print$2}'`
           docker push "${{ vars.DOCKER_IMAGE_NAME }}:$IMAGE_TAG"
