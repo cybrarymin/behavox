@@ -1,7 +1,13 @@
 5- Write examples for deployments the API in kubernetes ( deployment, readinessProb, livenessProb, Service, PDB, QOS Class, Pod Topology Constraints, Network Policies, AffinityConfigurations )
-# Event Queue API
 
-A high-performance, scalable event queue system with HTTP API for event submission and asynchronous processing.
+# Event Queue API
+This event queue system is only for **demo purpose**, showing code implementation and few concepts of having observability over a simple application. This architecture is not a production level architecture. The true architecture would be as follows which can be discussed.
+
+
+![Alt text here](docs/images/event-queue.jpg)
+
+
+
 
 ## Features
 
@@ -70,7 +76,7 @@ A high-performance, scalable event queue system with HTTP API for event submissi
    ```bash
    $ make help
    $ make audit
-   $ make build/api/dockerImage DOCKER_IMAGENAME=<reponame>
+   $ make build/api/dockerImage DOCKER_IMAGENAME=<repo-name>
    ```
 
 ### Running the Application
@@ -100,21 +106,21 @@ $ make run/api
 With custom settings:
 
 ```bash
-$ openssl req -new -x509 -nodes -newkey rsa:4096 -days 365 -keyout /tmp/key.pem -out /tmp/cert.pem -subj "/C=<Country Name>/ST=<State>/L=<Locality Name>/O=<Organization Name>/CN=<Common Name>" 
+$ openssl req -x509 -newkey rsa:4096 -keyout /tmp/key.pem -out /tmp/cert.pem -sha256 -days 3650 -nodes -subj "/C=CA/ST=ON/L=Toronto/O=Behavox/OU=Devops/CN=*.behavox.com" 1>&2 2>/dev/null;
 
-$ docker volume create 
+$ docker volume create processed-events
 
-$ docker run -v /tmp/cert.pem:/certificates/cert.pem -v /tmp/key.pem:/certificates/key.pem -v processed-events.json:/tmp/events.json -p 443:443 <IMAGE_NAME>:<TAG_NAME> \
+$ docker run -v /tmp/cert.pem:/certificates/cert.pem -v /tmp/key.pem:/certificates/key.pem -v processed-events.json:/etc/events.json -p 443:443 <IMAGE_NAME>:<TAG_NAME> \
   --log-level=debug \
   --jeager-host="host.docker.internal" \
   --cert=/certificates/cert.pem \
   --cert-key=/certificates/key.pem \
-  --listen-addr=https://localhost:443 \
+  --listen-addr=https://0.0.0.0:443 \
   --enable-rate-limit=true \
   --global-request-rate-limit=100 \
   --per-client-rate-limit=10 \
   --event-queue-size=1000 \
-  --event-processor-file=/tmp/events.json
+  --event-processor-file=/etc/events.json
 
 ```
 OR
@@ -192,6 +198,19 @@ curl -k -X GET https://localhost:443/v1/stats
 | `--event-processor-file` | Path for processed events JSON file | /tmp/events.json |
 | `--jeager-host` | Jaeger server address | localhost |
 | `--jeager-port` | Jaeger server port | 5317 |
+
+
+**Github actions and workflows**
+To avoid failure on github actions consider add the below secrets and environment variables in github "secrets and variables section"
+
+secrets:
+DOCKER_REGISTRY_USERNAME
+DOCKER_REGISTRY_PASS
+
+envs:
+DOCKER_IMAGE_NAME
+
+
 
 ## License
 
