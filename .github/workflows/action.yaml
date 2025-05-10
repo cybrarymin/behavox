@@ -72,7 +72,7 @@ jobs:
         run: make build/api/dockerImage DOCKER_IMAGENAME="${{ vars.DOCKER_IMAGE_NAME }}"
 
       - name: Log in to docker registry
-        run: docker login -u $DOCKER_REGISTRY_USERNAME -p $DOCKER_REGISTRY_PASS
+        run: echo $DOCKER_REGISTRY_PASS | docker login -u $DOCKER_REGISTRY_USERNAME --password-stdin 
 
       - name: Tag and Push Docker Image
         run: |
